@@ -392,7 +392,15 @@ body { transition: background-color 0s; }
 
 @media (max-width: 560px) {
   #hud { gap: 9px; padding: 0 8px 1px; }
-  #info { left: 16px; right: 16px; }
+  /* On phones the info panel runs from just below the info button to just
+     above the stats bar, with the same gap at both ends. */
+  #info {
+    left: 16px;
+    right: 16px;
+    top: calc(16px + var(--hud) + 6px);
+    bottom: calc(16px + var(--hud) + 6px);
+    max-height: none;
+  }
 }
 
 /* ---- debug toast ---- */

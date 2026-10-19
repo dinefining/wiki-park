@@ -382,15 +382,19 @@ const CIRCLES = [210, 330, 90].map(deg => {
   return [Math.round(CX + Math.cos(a) * D), Math.round(CY + Math.sin(a) * D), R];
 });
 const BLOCK = 4;   // terrain is drawn in 4px blocks
-const LONER_SHARE = 0.12;
+const LONER_SHARE = 0.33; // share of single-theme articles that grow on their own, spread evenly
 const GW = W / BLOCK, GH = HGT / BLOCK;
 
 // Articles grow as flowers, bushes or trees, by how long their Wikipedia article is.
 // Seen from above, flat colour, one pixel apart at least.
+// Three shapes, seen from above:
+//   0 cross   – the shorter articles
+//   1 ring    – articles where the themes mix (hollow in the middle, still clickable)
+//   2 diamond – long, substantial articles about one theme
 const SPRITES = [
   ['.#.', '###', '.#.'],
-  ['.###.', '#####', '#####', '#####', '.###.'],
-  ['..###..', '.#####.', '#######', '#######', '#######', '.#####.', '..###..'],
+  ['.###.', '#####', '##.##', '#####', '.###.'],
+  ['..#..', '.###.', '#####', '.###.', '..#..'],
 ];
 const SPRITE_PX = SPRITES.map(rows => {
   const half = (rows.length - 1) / 2, px = [];
@@ -540,7 +544,7 @@ function makeLayout(list, terrain) {
 
     let prev = null;
     for (const chunk of chunks) {
-      const spread = 2.6 * Math.sqrt(chunk.length) + 3;
+      const spread = 3.0 * Math.sqrt(chunk.length) + 3;
       const center = findGroveCenter(mask, spread, prev, groves, dry);
       prev = center;
       const grove = { x: center[0], y: center[1], r: 0 };
@@ -562,18 +566,37 @@ function makeLayout(list, terrain) {
       groves.push(grove);
     }
   }
-  // Loners: anywhere in their own region, but out in the open, away from groves.
+  // Loners: in their own region, each in the emptiest of a dozen candidate
+  // spots (farthest from any plant so far), so they spread out evenly.
+  const CELL = 32, cols = Math.ceil(W / CELL), cells = new Map();
+  const remember = (x, y) => {
+    const k = Math.floor(x / CELL) + Math.floor(y / CELL) * cols;
+    if (!cells.has(k)) cells.set(k, []);
+    cells.get(k).push(x, y);
+  };
+  const nearestPlant = (x, y) => {
+    let best = 1e9;
+    const cx = Math.floor(x / CELL), cy = Math.floor(y / CELL);
+    for (let oy = -2; oy <= 2; oy++) for (let ox = -2; ox <= 2; ox++) {
+      const list = cells.get(cx + ox + (cy + oy) * cols);
+      if (list) for (let i = 0; i < list.length; i += 2) best = Math.min(best, Math.hypot(list[i] - x, list[i + 1] - y));
+    }
+    return best;
+  };
+  for (const a of articles) remember(a[2], a[3]);
   for (const e of loners) {
-    let placed = false;
-    for (let tries = 0; tries < 3000 && !placed; tries++) {
+    let best = null, bestD = -1;
+    for (let c = 0, tries = 0; c < 12 && tries < 4000; tries++) {
       const x = Math.round(30 + rand() * (W - 60)), y = Math.round(30 + rand() * (HGT - 60));
       if (!fits(x, y, e.size, e.mask)) continue;
-      if (groves.some(g => Math.hypot(g.x - x, g.y - y) < g.r + 10)) continue;
-      take(x, y, e.size);
-      articles.push([e.title, e.mask, x, y, ...e.mix, e.size]);
-      placed = true;
+      c++;
+      const d = nearestPlant(x, y);
+      if (d > bestD) { bestD = d; best = [x, y]; }
     }
-    if (!placed) dropped++;
+    if (!best) { dropped++; continue; }
+    take(best[0], best[1], e.size);
+    remember(best[0], best[1]);
+    articles.push([e.title, e.mask, best[0], best[1], ...e.mix, e.size]);
   }
   console.log(`  ${loners.length} articles grow alone in the meadows`);
   if (dropped) console.log(`  (${dropped} articles found no room)`);
@@ -654,12 +677,14 @@ function encodeTerrain({ band, feat }) {
 }
 
 // Sizes by article length: about half flowers, a third bushes, the longest sixth trees.
-function assignSizes(list) {
-  const lengths = list.map(e => e.length || 0).sort((a, b) => a - b);
-  const q = p => lengths[Math.floor(p * (lengths.length - 1))];
-  const bush = q(0.5), tree = q(0.84);
-  for (const e of list) e.size = (e.length || 0) >= tree ? 2 : (e.length || 0) >= bush ? 1 : 0;
-  return [bush, tree];
+// Shapes: a ring where the themes mix (more than one colour), a diamond for
+// the longest third of the rest, a cross for everything else.
+function assignShapes(list) {
+  const mixed = e => e.mix.filter(Boolean).length > 1;
+  const lengths = list.filter(e => !mixed(e)).map(e => e.length || 0).sort((a, b) => a - b);
+  const diamondBytes = lengths[Math.floor(0.66 * (lengths.length - 1))];
+  for (const e of list) e.size = mixed(e) ? 1 : (e.length || 0) >= diamondBytes ? 2 : 0;
+  return diamondBytes;
 }
 
 // ---------------------------------------------------------------- main -----
@@ -724,12 +749,12 @@ function assignSizes(list) {
   console.log(`  ${tinted} articles carry a mix of more than one set`);
 
   console.log('Shaping the land…');
-  const sizeLengths = assignSizes(list);
+  const diamondBytes = assignShapes(list);
   const terrain = makeTerrain();
   const { articles, groves } = makeLayout(list, terrain);
   const cover = addVegetation(terrain, articles, groves);
   const sizes = [0, 1, 2].map(k => articles.filter(a => a[7] === k).length);
-  console.log(`  ${articles.length} plants (${sizes[0]} flowers, ${sizes[1]} bushes, ${sizes[2]} trees) in ${groves.length} groves, ${(cover * 100).toFixed(0)}% thicket`);
+  console.log(`  ${articles.length} plants (${sizes[0]} crosses, ${sizes[1]} rings, ${sizes[2]} diamonds) in ${groves.length} groves, ${(cover * 100).toFixed(0)}% thicket`);
 
   const world = {
     version: 3,
@@ -739,7 +764,7 @@ function assignSizes(list) {
     circles: CIRCLES,
     terrain: encodeTerrain(terrain),
     sprites: SPRITES,
-    sizeLengths, // article length (bytes) from which a plant is a bush, a tree
+    diamondBytes, // article length (bytes) from which a single-theme article is a diamond
     articles, // [title, mask, centreX, centreY, n, t, h, size]
   };
   const out = path.join(__dirname, 'world.json');

@@ -3,7 +3,7 @@
   'use strict';
 
   // Bump with index.html's ?v= tags when you publish changes, so browsers fetch fresh files.
-  const VERSION = '2026-10-19g';
+  const VERSION = '2026-10-20b';
   const CFG = window.WIKIPARK_CONFIG || {};
   const $ = s => document.querySelector(s);
   const canvas = $('#world');
@@ -44,8 +44,8 @@
   // Articles: a mix of pine green (nature), blue spruce (technology) and
   // heather (human individuality), in quarters. Flowers are paler, like
   // blossoms; trees darker, like canopies.
-  const SET_COLOURS = [hex('#3fa02a'), hex('#2f8fa0'), hex('#cf9ee0')];
-  const SIZE_TONE = [0.38, 0, -0.2]; // flower, bush, tree: toward white / as is / toward black
+  const SET_COLOURS = [hex('#f4fc8c'), hex('#86e2fa'), hex('#eeaef4')]; // nature, technology, being human
+  const SIZE_TONE = [0, 0, -0.08]; // cross, ring, diamond: diamonds a touch deeper
   const mixKey = a => (a[4] * 25 + a[5] * 5 + a[6]) * 3 + a[7];
   const ART_CSS = new Map(), ART_HOVER_CSS = new Map();
   for (let n = 0; n <= 4; n++) for (let t = 0; t <= 4 - n; t++) for (let size = 0; size < 3; size++) {
@@ -123,12 +123,25 @@
 
   // Your circle of view by day: inside, everything; at its edge the world
   // fades out over a few dithered steps into the dark you'd see at night.
-  const VISION = 0.72;   // radius as a share of half the screen's diagonal
-  const FADE = 9;        // world pixels from fully seen to unseen
-  const FAR_STEPS = 4;   // tones in between
-  const FAR_FACTOR = [1, 0.72, 0.48, 0.28, 0.14];
-  const DAY_DARK_U32 = u32([4, 24, 6]);
-  const visionRadius = () => VISION * Math.hypot(innerWidth, innerHeight) / scale / 2;
+  // The view is an oval that fits the screen with the same margin on every
+  // side, so it follows any screen shape. The fade runs inward from its edge.
+  const VISION_MARGIN = 0.015; // of the screen's shorter side, dim beyond the oval
+  const FADE = 11;           // world pixels from fully seen to unseen
+  const FAR_STEPS = 5;       // tones in between
+  // Fade steps, then (last) the world beyond the oval: very dim, but not gone.
+  const FAR_FACTOR = [1, 0.8, 0.63, 0.48, 0.36, 0.27, 0.2];
+  function visionOval() {
+    const hw = innerWidth / scale / 2, hh = innerHeight / scale / 2;
+    const m = VISION_MARGIN * Math.min(hw, hh) * 2;
+    return { a: Math.max(8, hw - m), b: Math.max(8, hh - m) };
+  }
+  // Signed distance in world pixels from the oval's edge (negative inside),
+  // measured along the line from the centre, so the fade is even all round.
+  function ovalEdge(dx, dy, o) {
+    const r = Math.sqrt((dx / o.a) ** 2 + (dy / o.b) ** 2);
+    if (r === 0) return -Math.min(o.a, o.b);
+    return (r - 1) * (Math.hypot(dx, dy) / r);
+  }
   const farMaps = FAR_FACTOR.map(() => new Map());
   function far(p, step) {
     const m = farMaps[step];
@@ -193,24 +206,37 @@
     const g = ground.getContext('2d');
     const img = g.createImageData(w, h);
     const px = new Uint32Array(img.data.buffer);
-    // Palette per (biome, terrace) and per feature.
-    const pal = new Uint32Array(8 * bands);
-    for (let m = 0; m < 8; m++) for (let b = 0; b < bands; b++) {
-      const [r, gg, bb] = GROUND[m];
-      pal[m * bands + b] = u32([r, Math.max(0, Math.min(255, gg + BAND_G[b])), bb]);
+    // Ground colour = biome × terrace × moisture. Dry patches lean yellow,
+    // damp ones blue-green, so the land shifts gently as you walk.
+    const MOIST = [[12, 4, -4], [0, 0, 0], [-6, -6, 10]];
+    const shade = ([r, gg, bb]) => u32([r, gg, bb].map(v => Math.max(0, Math.min(255, Math.round(v)))));
+    const pal = new Uint32Array(8 * bands * 3), tuftLight = new Uint32Array(pal.length), tuftDark = new Uint32Array(pal.length), moss = new Uint32Array(pal.length);
+    for (let m = 0; m < 8; m++) for (let b = 0; b < bands; b++) for (let k = 0; k < 3; k++) {
+      const [r, gg, bb] = GROUND[m], [mr, mg, mb] = MOIST[k], i = (m * bands + b) * 3 + k;
+      const base = [r + mr, gg + BAND_G[b] + mg, bb + mb];
+      pal[i] = shade(base);
+      tuftLight[i] = shade([base[0], base[1] + 14, base[2]]);
+      tuftDark[i] = shade([base[0], base[1] - 12, base[2]]);
+      moss[i] = shade([base[0] - 4, base[1] - 22, base[2] + 2]);
     }
-    const tuftLight = pal.map(p => { const [r, gg, bb] = rgbOf(p); return u32([r, Math.min(255, gg + 14), bb]); });
-    const tuftDark = pal.map(p => { const [r, gg, bb] = rgbOf(p); return u32([r, Math.max(0, gg - 12), bb]); });
+    const PEBBLE = u32(hex('#9aa08e')), PEBBLE_DARK = u32(hex('#7c8274'));
     // Water is drawn flat here; small moving glints are added each frame.
     const featPal = [0, u32(VEG), u32(VEG_DEEP), u32(WATER), u32(WATER), u32(SAND)];
     const wallPal = [u32(VEG_DEEP), u32([0, 78, 6]), u32([0, 66, 10]), u32(VEG_DEEP)];
     const cells = terrainCells = new Uint8Array(terrain.length);
     for (let i = 0; i < terrain.length; i++) cells[i] = parseInt(terrain[i], 36);
+    // Moisture per block, from two layers of smooth noise.
+    const moisture = new Uint8Array(cells.length);
+    for (let by = 0; by < world.gh; by++) for (let bx = 0; bx < gw; bx++) {
+      const v = valueNoise(bx / 22, by / 22, 11) * 0.65 + valueNoise(bx / 7, by / 7, 12) * 0.35;
+      moisture[by * gw + bx] = v < 0.4 ? 0 : v > 0.6 ? 2 : 1;
+    }
     const c = world.circles;
     for (let y = 0; y < h; y++) {
       const row = Math.floor(y / block) * gw;
       for (let x = 0; x < w; x++) {
-        const cell = cells[row + Math.floor(x / block)];
+        const ci = row + Math.floor(x / block);
+        const cell = cells[ci];
         const feat = Math.floor(cell / bands);
         if (feat) { px[y * w + x] = featPal[feat]; continue; }
         let m = 0;
@@ -218,12 +244,16 @@
           const dx = x - c[i][0], dy = y - c[i][1];
           if (dx * dx + dy * dy < c[i][2] * c[i][2]) m |= 1 << i;
         }
-        // Sparse grass tufts give the meadows texture, so walking feels like moving.
-        let hsh = Math.imul(x, 374761393) + Math.imul(y, 668265263);
-        hsh = Math.imul(hsh ^ (hsh >>> 13), 1274126177);
-        hsh = ((hsh ^ (hsh >>> 16)) >>> 0) % 1000;
-        const base = m * bands + (cell % bands);
-        px[y * w + x] = hsh < 22 ? tuftLight[base] : hsh < 34 ? tuftDark[base] : pal[base];
+        const k = moisture[ci];
+        const base = (m * bands + (cell % bands)) * 3 + k;
+        // Texture: grass tufts everywhere, pebbles now and then, moss in damp ground.
+        const t = hash3(x, y, 1);
+        let col = t < 0.022 ? tuftLight[base] : t < 0.034 ? tuftDark[base] : pal[base];
+        const pb = hash3(x, y, 9);
+        if (pb < 0.0016) col = PEBBLE;
+        else if (pb < 0.0026) col = PEBBLE_DARK;
+        else if (k === 2 && hash3(x >> 1, y >> 1, 13) < 0.05) col = moss[base];
+        px[y * w + x] = col;
       }
     }
     // A ragged band of forest wall along the world's edge.
@@ -259,7 +289,8 @@
   }
 
   // Articles: [title, mask, centreX, centreY, n, t, h, size(, planterTint)]
-  const halfOf = a => a[7] + 1;
+  // Half the width of a plant's shape, plus one: just outside its edge.
+  const halfOf = a => (world.sprites[a[7]].length - 1) / 2 + 1;
 
   function indexArticle(i) {
     const a = world.articles[i];
@@ -386,14 +417,25 @@
   const lanterns = new Map(); // id -> { id, article_title, x, y, created_at }
   let lanternGroups = [];     // aggregated by article position
 
+  // Lanterns on things that aren't plants (a well, the owl, the ancient tree)
+  // are titled with this mark and stay where they were left.
+  const SPOT_MARK = '✦ ';
+  const spotName = title => title.startsWith(SPOT_MARK) ? title.slice(SPOT_MARK.length) : title;
+
   function addLantern(l) {
     if (!l || !l.article_title) return;
-    // Anchor to the article by title, so lanterns survive a rebuilt world.json.
-    const i = titleIndex.get(l.article_title);
-    if (i === undefined) return;
-    const a = world.articles[i];
     const id = l.id != null ? String(l.id) : `local-${l.article_title}-${l.created_at}`;
-    lanterns.set(id, { ...l, id, x: a[2], y: a[3], size: a[7] });
+    if (l.article_title.startsWith(SPOT_MARK)) {
+      const x = Number(l.x), y = Number(l.y);
+      if (!(x >= 0 && y >= 0 && x < world.w && y < world.h)) return;
+      lanterns.set(id, { ...l, id, x, y, size: 1 });
+    } else {
+      // Plants: anchored by title, so lanterns survive a rebuilt world.json.
+      const i = titleIndex.get(l.article_title);
+      if (i === undefined) return;
+      const a = world.articles[i];
+      lanterns.set(id, { ...l, id, x: a[2], y: a[3], size: a[7] });
+    }
     groupLanterns();
   }
 
@@ -452,8 +494,9 @@
     return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
   }
 
-  async function leaveLantern(article) {
-    const row = { article_title: article[0], x: article[2], y: article[3] };
+  // spot: { title, x, y }, a plant or a special place.
+  async function leaveLantern(spot) {
+    const row = { article_title: spot.title, x: Math.round(spot.x), y: Math.round(spot.y) };
     const created = new Date().toISOString();
     if (net.client) {
       const secret = newId();
@@ -495,11 +538,11 @@
   }
 
   // L or the card's lantern icon: leave one, or take back your own.
-  function toggleLantern(i) {
-    const a = world.articles[i];
-    const own = myLanternOn(a[0]);
-    if (own) { takeBackLantern(own); toast(`lantern taken back: ${a[0]}`); }
-    else { leaveLantern(a); toast(`lantern left: ${a[0]}`); }
+  const spotOf = i => ({ title: world.articles[i][0], x: world.articles[i][2], y: world.articles[i][3] });
+  function toggleLantern(spot) {
+    const own = myLanternOn(spot.title);
+    if (own) { takeBackLantern(own); toast(`lantern taken back: ${spotName(spot.title)}`); }
+    else { leaveLantern(spot); toast(`lantern left: ${spotName(spot.title)}`); }
   }
 
   // ----------------------------------------------------------- planting ---
@@ -610,8 +653,6 @@
     const why = whyNotHere(title, page, cats);
     if (why) throw new Error(why);
     const length = (page && page.length) || 0;
-    const [bushAt, treeAt] = world.sizeLengths;
-    const size = length >= treeAt ? 2 : length >= bushAt ? 1 : 0;
     const text = [title, ...cats];
     let score = [0, 1, 2].map(k => (region & (1 << k) ? 1.5 : 0) + text.filter(t => KEYWORDS[k].test(t)).length);
     if (!score.some(Boolean)) score = [1, 1, 1];
@@ -620,6 +661,8 @@
     const q = raw.map(Math.floor);
     let left = 4 - q[0] - q[1] - q[2];
     raw.map((v, k) => [v - q[k], k]).sort((a, b) => b[0] - a[0]).forEach(([, k]) => { if (left > 0) { q[k]++; left--; } });
+    // Same shapes as prepare.js: a ring where themes mix, a diamond if long, else a cross.
+    const size = q.filter(Boolean).length > 1 ? 1 : length >= world.diamondBytes ? 2 : 0;
     return { mix: q, size };
   }
 
@@ -813,21 +856,28 @@
             }
           }
         }
-        // Your circle of view. Past its edge the world fades out in dithered
-        // steps over FADE pixels and then there's nothing, as at night.
+        // Your oval of view. Towards its edge the world fades out in dithered
+        // steps over FADE pixels, and past it there's nothing, as at night.
         const ccx = cam.x - ix + innerWidth / scale / 2, ccy = cam.y - iy + innerHeight / scale / 2;
-        const R = visionRadius(), inner = (R - FADE / 2) ** 2;
+        const oval = visionOval();
+        const ia = 1 / (oval.a - FADE) ** 2, ib = 1 / (oval.b - FADE) ** 2;
         for (let y = 0; y < vh; y++) {
-          const by = (y & 3) * 4, dy2 = (y + 0.5 - ccy) ** 2;
+          const by = (y & 3) * 4, dy = y + 0.5 - ccy;
           for (let x = 0; x < vw; x++) {
             const i = y * vw + x;
             let p = px[i];
-            const d2 = (x + 0.5 - ccx) ** 2 + dy2;
+            const dx = x + 0.5 - ccx;
             let step = 0;
-            if (d2 > inner) {
-              const t = (Math.sqrt(d2) - (R - FADE / 2)) / FADE; // 0 at the fade's start, 1 at its end
+            if (dx * dx * ia + dy * dy * ib > 1) { // outside the fully seen part
+              const t = (ovalEdge(dx, dy, oval) + FADE) / FADE; // 0 where the fade starts, 1 at the edge
               step = Math.floor(t * FAR_STEPS + BAYER[by + (x & 3)]);
-              if (step > FAR_STEPS) { px[i] = DAY_DARK_U32; continue; }
+              if (step > FAR_STEPS) {
+                let q = p;
+                if (haloBuf[i] >= 0) q = warmth(q, haloBuf[i]);
+                if (level > 0) q = shift(q, level);
+                px[i] = far(q, FAR_STEPS + 1);
+                continue;
+              }
             }
             if (WARM.has(p)) continue;
             if (haloBuf[i] >= 0) p = warmth(p, haloBuf[i]);
@@ -893,6 +943,14 @@
         if (h < 0.012) ctx.fillRect(x - ix, y - iy, 2, 1);
       }
     }
+  }
+
+  // Smooth value noise in 0..1 on an integer lattice.
+  function valueNoise(x, y, seed) {
+    const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0;
+    const sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
+    const a = hash3(x0, y0, seed), b = hash3(x0 + 1, y0, seed), c = hash3(x0, y0 + 1, seed), d = hash3(x0 + 1, y0 + 1, seed);
+    return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
   }
 
   function hash3(x, y, z) {
@@ -1036,15 +1094,23 @@
   const STONE = [css(hex('#9c9a8c')), css(hex('#7e7c70'))];
   const WELL_WATER = css(hex('#1c3c5c'));
   // Toadstools: c cap, d spots, u the cap's darker underside, s stem, * a twinkle.
-  const TOADSTOOL_COLOURS = { c: css(hex('#ece2cc')), d: css(hex('#c8b89c')), u: css(hex('#b4a487')), s: css(hex('#f6f1e4')), '*': css(hex('#ffffff')) };
-  const TOADSTOOL_SMALL = ['ccc', 'uuu', '.s.']; // T-shaped, so they don't read as the plus-shaped flowers
+  // Muted toward the meadow, but still the palest thing around: it should read as special.
+  const TOADSTOOL_COLOURS = { c: css(hex('#d2c9ab')), d: css(hex('#ada285')), u: css(hex('#978d6e')), s: css(hex('#dcd5c0')), '*': css(hex('#f2eedf')) };
   const TOADSTOOL_BIG = ['..ccc..', '.cdccc.', 'ccccdcc', '.uuuuu.', '...s...', '..sss..'];
   const ANCIENT_COLOURS = ['#2c5c2c', '#3c6c34', '#4c7c3c', '#9cac8c'].map(hex).map(css);
   const BOTTLE = css(hex('#5c9c7c')), CORK = css(hex('#be9b65'));
-  const OWL = css(hex('#8c7c64')), OWL_EYE = css(hex('#ece6b4'));
-  const DEER = css(hex('#8c6c4c')), DEER_TAIL = css(hex('#ece2d4'));
-  const FROG = css(hex('#4c7c34')), FROG_EYE = css(hex('#d4e4a0'));
+  // Every animal sits on the same pale, rounded base (a plant's shape), with
+  // a 3×3 animal drawn on top, so they read as one family.
+  const ANIMAL_BASE = ['.###.', '#####', '#####', '#####', '.###.'];
+  const BASE = css(hex('#dfe5c6'));
+  const OWL = css(hex('#7c6c54')), OWL_EYE = css(hex('#f0e6a0'));
+  const DEER = css(hex('#7c5a3a')), DEER_ANTLER = css(hex('#b08a5c'));
+  const FROG = css(hex('#4c7c34')), FROG_EYE = css(hex('#1c2c14'));
   const BIRD = css(hex('#2c2a26')), BIRD_BEAK = css(hex('#d8c27a'));
+  function drawAnimal(rows, colours, x, y, ix, iy) {
+    drawSprite(ANIMAL_BASE, x - 2 - ix, y - 2 - iy, { '#': BASE });
+    drawSprite(rows, x - 1 - ix, y - 1 - iy, colours);
+  }
 
   const WELL_PX = ['..###..', '.#####.', '##ooo##', '##ooo##', '##ooo##', '.#####.', '..###..'];
   const ANCIENT_PX = [
@@ -1062,7 +1128,6 @@
     '....aaab.a...',
     '......a......',
   ];
-  const DEER_PX = { still: ['.....##', '.#####.', '#######', '.#####.'], run: [['.....##', '.#####.', '#######', '.#####.', '.#...#.'], ['.....##', '.#####.', '#######', '.#####.', '..#.#..']] };
 
   function seeded(seed) {
     return () => {
@@ -1119,15 +1184,10 @@
   const near = (s, ix, iy, r) => s && s.x > ix - r && s.y > iy - r && s.x < ix + vw + r && s.y < iy + vh + r;
 
   function drawSecrets(ix, iy, ft) {
-    // Fairy rings: small toadstools in a circle, a bigger one in the middle
-    // that twinkles now and then. Click it to be whisked away.
+    // Fairy toadstools: one big toadstool that twinkles now and then. Click it
+    // to be whisked away.
     for (const r of secrets.rings) {
       if (!near(r, ix, iy, 12)) continue;
-      for (let k = 0; k < 9; k++) {
-        const a = (k / 9) * Math.PI * 2 + r.x;
-        const mx = Math.round(r.x + Math.cos(a) * 7) - ix, my = Math.round(r.y + Math.sin(a) * 7) - iy;
-        drawSprite(TOADSTOOL_SMALL, mx - 1, my - 1, TOADSTOOL_COLOURS);
-      }
       drawSprite(TOADSTOOL_BIG, r.x - 3 - ix, r.y - 3 - iy, TOADSTOOL_COLOURS);
       if (Math.floor(ft / 450 + r.x) % 5 === 0) drawSprite(['*'], r.x + 2 - ix, r.y - 5 - iy, TOADSTOOL_COLOURS);
     }
@@ -1143,20 +1203,13 @@
       ctx.fillStyle = CORK; ctx.fillRect(bx + 2, by, 1, 1);
     }
     const o = secrets.owl;
-    if (o) drawSprite(['#.#', 'e#e', '###'], o.x - 1 - ix, o.y - 1 - iy, { '#': OWL, e: OWL_EYE });
+    if (o) drawAnimal(['#.#', 'e#e', '###'], { '#': OWL, e: OWL_EYE }, o.x, o.y, ix, iy);
     const fr = secrets.frog;
-    if (fr) drawSprite(['e.e', '###', '#.#'], fr.x - 1 - ix, fr.y - 1 - iy, { '#': FROG, e: FROG_EYE });
+    if (fr) drawAnimal(['e.e', '###', '#.#'], { '#': FROG, e: FROG_EYE }, fr.x, fr.y, ix, iy);
     const bd = secrets.bird;
-    if (bd) drawSprite(['.y.', '###', '.#.'], bd.x - 1 - ix, bd.y - 1 - iy, { '#': BIRD, y: BIRD_BEAK });
+    if (bd) drawAnimal(['.y.', '###', '.#.'], { '#': BIRD, y: BIRD_BEAK }, bd.x, bd.y, ix, iy);
     const d = secrets.deer;
-    if (d) {
-      const rows = d.state === 'run' ? DEER_PX.run[Math.floor(ft / 120) % 2] : DEER_PX.still;
-      const flip = d.dir < 0;
-      const shaped = flip ? rows.map(r => [...r].reverse().join('')) : rows;
-      drawSprite(shaped, Math.round(d.x) - 3 - ix, Math.round(d.y) - 2 - iy, { '#': DEER });
-      ctx.fillStyle = DEER_TAIL;
-      ctx.fillRect(Math.round(d.x) + (flip ? 3 : -3) - ix, Math.round(d.y) - iy, 1, 1);
-    }
+    if (d) drawAnimal(['a.a', '###', '#.#'], { '#': DEER, a: DEER_ANTLER }, d.x, d.y, ix, iy);
   }
 
   function isWater(x, y) {
@@ -1220,7 +1273,7 @@
       articlesIn(cam.x, cam.y, cam.x + vw, cam.y + vh, (i, a) => { if (a[7] >= 1) perches.push(a); });
       if (perches.length && Math.random() < 0.6) {
         const a = perches[Math.floor(Math.random() * perches.length)];
-        secrets.bird = { x: a[2], y: a[3] - 1, born: t };
+        secrets.bird = { x: a[2], y: a[3], born: t };
         playSample('Common blackbird');
       }
     }
@@ -1241,33 +1294,22 @@
     }
     if (secrets.frog && (level < 2 || t - secrets.frog.born > 40000)) secrets.frog = null;
 
-    // By day a deer may be grazing in a meadow ahead of you; come close and it bolts.
+    // By day a deer may be standing in a meadow near you, grazing.
     if (level <= 2 && !secrets.deer && t > secrets.nextDeer) {
       secrets.nextDeer = t + 45000 + Math.random() * 60000;
       if (Math.random() < 0.45) {
         for (let k = 0; k < 40; k++) {
-          const a = Math.random() * Math.PI * 2, r = 45 + Math.random() * 30;
+          const a = Math.random() * Math.PI * 2, r = 18 + Math.random() * 22;
           const x = Math.round(me.x + Math.cos(a) * r), y = Math.round(me.y + Math.sin(a) * r);
           if (isMeadow(x - 4, y) && isMeadow(x + 4, y) && articleAt(x, y) < 0) {
-            secrets.deer = { x, y, dir: Math.random() < 0.5 ? -1 : 1, state: 'graze', born: t };
+            secrets.deer = { x, y, born: t };
             break;
           }
         }
       }
     }
     const d = secrets.deer;
-    if (d) {
-      const dist = Math.hypot(d.x - me.x, d.y - me.y);
-      if (d.state === 'graze' && dist < 18) {
-        d.state = 'run';
-        const a = Math.atan2(d.y - me.y, d.x - me.x);
-        d.vx = Math.cos(a) * 48; d.vy = Math.sin(a) * 48;
-        d.dir = d.vx < 0 ? -1 : 1;
-        rustle();
-      }
-      if (d.state === 'run') { d.x += d.vx * dt; d.y += d.vy * dt; }
-      if (dist > 150 || t - d.born > 120000 || level > 2) secrets.deer = null;
-    }
+    if (d && (Math.hypot(d.x - me.x, d.y - me.y) > 150 || t - d.born > 120000 || level > 2)) secrets.deer = null;
 
     if (secrets.warp && t - secrets.warp.start > secrets.warp.half && !secrets.warp.moved) {
       secrets.warp.moved = true;
@@ -1303,12 +1345,13 @@
     const hit = (s, r) => s && Math.abs(wx - s.x) <= r && Math.abs(wy - s.y) <= r;
     for (const w of secrets.wells) if (hit(w, 3)) return () => openWell(w);
     for (const r of secrets.rings) if (hit(r, 3)) return () => { if (!secrets.warp) startWarp(performance.now()); };
-    if (hit(secrets.ancient, 6)) return () => openTitle(ANCIENT.title, `the ancient tree · first written ${ANCIENT.since}`);
-    if (hit(secrets.bottle, 2)) return () => { secrets.bottle = null; openBottle(); };
-    if (hit(secrets.owl, 1)) return () => { playSample('Tawny owl', hoot); openTitle('Owl', 'a night owl'); };
-    if (hit(secrets.frog, 1)) return () => { playSample('Common frog'); openTitle('Common frog', 'a frog by the water'); };
-    if (hit(secrets.bird, 1)) return () => { playSample('Common blackbird'); openTitle('Common blackbird', 'a blackbird'); };
-    if (hit(secrets.deer, 3)) return () => { playSample('Red deer'); openTitle('Deer', 'a deer'); };
+    const here = o => ({ x: Math.round(o.x), y: Math.round(o.y) });
+    if (hit(secrets.ancient, 6)) return () => openTitle(ANCIENT.title, `the ancient tree · first written ${ANCIENT.since}`, here(secrets.ancient));
+    if (hit(secrets.bottle, 2)) return () => { const at = here(secrets.bottle); secrets.bottle = null; openBottle(at); };
+    if (hit(secrets.owl, 2)) return () => { playSample('Tawny owl', hoot); openTitle('Owl', 'a night owl', here(secrets.owl)); };
+    if (hit(secrets.frog, 2)) return () => { playSample('Common frog'); openTitle('Common frog', 'a frog by the water', here(secrets.frog)); };
+    if (hit(secrets.bird, 2)) return () => { playSample('Common blackbird'); openTitle('Common blackbird', 'a blackbird', here(secrets.bird)); };
+    if (hit(secrets.deer, 2)) return () => { playSample('Red deer'); openTitle('Deer', 'a deer', here(secrets.deer)); };
     return null;
   }
 
@@ -1330,33 +1373,35 @@
   };
   const pageUrl = p => p && p.content_urls && p.content_urls.desktop && p.content_urls.desktop.page;
 
+  const WELL_NAMES = { picture: 'the picture well', featured: 'the well of featured articles', onthisday: 'the well of days' };
   async function openWell(w) {
+    const spot = { title: SPOT_MARK + WELL_NAMES[w.kind], x: w.x, y: w.y };
     const kickers = { picture: 'a well · picture of the day', featured: "a well · today's featured article", onthisday: 'a well · on this day' };
-    openSpecial({ kicker: kickers[w.kind], title: 'the water stirs…', text: '' });
+    openSpecial({ kicker: kickers[w.kind], title: 'the water stirs…', text: '' , spot });
     const token = cardToken;
     try {
       const f = await feedFor(new Date());
       if (token !== cardToken) return;
       if (w.kind === 'featured' && f.tfa) {
-        openSpecial({ kicker: kickers.featured, title: (f.tfa.titles && f.tfa.titles.normalized) || f.tfa.title, text: trim(f.tfa.extract), thumb: f.tfa.thumbnail && f.tfa.thumbnail.source, url: pageUrl(f.tfa), tuneTitle: f.tfa.title });
+        openSpecial({ kicker: kickers.featured, title: (f.tfa.titles && f.tfa.titles.normalized) || f.tfa.title, text: trim(f.tfa.extract), thumb: f.tfa.thumbnail && f.tfa.thumbnail.source, url: pageUrl(f.tfa), tuneTitle: f.tfa.title , spot });
       } else if (w.kind === 'picture' && f.image) {
         const name = (f.image.title || '').replace(/^File:/, '').replace(/\.[a-z0-9]+$/i, '').replace(/_/g, ' ');
         const text = f.image.description && (f.image.description.text || '').replace(/<[^>]+>/g, '');
-        openSpecial({ kicker: kickers.picture, title: name, text: trim(text), thumb: f.image.thumbnail && f.image.thumbnail.source, url: f.image.file_page });
+        openSpecial({ kicker: kickers.picture, title: name, text: trim(text), thumb: f.image.thumbnail && f.image.thumbnail.source, url: f.image.file_page , spot });
       } else if (w.kind === 'onthisday' && f.onthisday && f.onthisday.length) {
         const events = f.onthisday.slice().sort(() => Math.random() - 0.5).slice(0, 3).sort((a, b) => a.year - b.year);
         const today = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long' });
-        openSpecial({ kicker: kickers.onthisday, title: today, text: events.map(e => `${e.year}: ${e.text}`).join('\n\n'), url: pageUrl(events[0].pages && events[0].pages[0]) });
+        openSpecial({ kicker: kickers.onthisday, title: today, text: events.map(e => `${e.year}: ${e.text}`).join('\n\n'), url: pageUrl(events[0].pages && events[0].pages[0]) , spot });
       } else {
-        openSpecial({ kicker: kickers[w.kind], title: 'the well is quiet today', text: 'Come back tomorrow.' });
+        openSpecial({ kicker: kickers[w.kind], title: 'the well is quiet today', text: 'Come back tomorrow.' , spot });
       }
     } catch (e) {
-      if (token === cardToken) openSpecial({ kicker: kickers[w.kind], title: 'the well is quiet', text: 'Wikipedia could not be reached just now.' });
+      if (token === cardToken) openSpecial({ kicker: kickers[w.kind], title: 'the well is quiet', text: 'Wikipedia could not be reached just now.' , spot });
     }
   }
 
   // A featured article from a random day since 2010.
-  async function openBottle() {
+  async function openBottle(at) {
     openSpecial({ kicker: 'a message in a bottle', title: 'unrolling the paper…', text: '' });
     const token = cardToken;
     const from = new Date(2010, 0, 1).getTime(), to = Date.now() - 864e5;
@@ -1367,7 +1412,8 @@
         if (token !== cardToken) return;
         if (!f.tfa) continue;
         const when = date.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
-        openSpecial({ kicker: `a message in a bottle · featured on ${when}`, title: (f.tfa.titles && f.tfa.titles.normalized) || f.tfa.title, text: trim(f.tfa.extract), thumb: f.tfa.thumbnail && f.tfa.thumbnail.source, url: pageUrl(f.tfa), tuneTitle: f.tfa.title });
+        openSpecial({ kicker: `a message in a bottle · featured on ${when}`, title: (f.tfa.titles && f.tfa.titles.normalized) || f.tfa.title, text: trim(f.tfa.extract), thumb: f.tfa.thumbnail && f.tfa.thumbnail.source, url: pageUrl(f.tfa), tuneTitle: f.tfa.title,
+          spot: at && { title: SPOT_MARK + ((f.tfa.titles && f.tfa.titles.normalized) || f.tfa.title), x: at.x, y: at.y } });
         return;
       } catch (e) { /* try another day */ }
     }
@@ -1375,15 +1421,18 @@
   }
 
   // An article by title: its own card if it grows in the forest, else a special one.
-  function openTitle(title, kicker) {
+  // where: the place you met it (owl, frog, deer, the ancient tree), so a
+  // lantern stays there. Without it, a plant's own card if it grows here.
+  function openTitle(title, kicker, where) {
     const i = titleIndex.get(title);
-    if (i !== undefined) { openPanel(i, kicker); return; }
-    openSpecial({ kicker, title, text: '…', url: wikiUrl(title) });
+    if (i !== undefined && !where) { openPanel(i, kicker); return; }
+    const spot = where && { title: SPOT_MARK + title, x: where.x, y: where.y };
+    openSpecial({ kicker, title, text: '…', url: wikiUrl(title), spot });
     const token = cardToken;
     fetch(summaryUrl(title)).then(r => r.json()).then(d => {
       if (token !== cardToken) return;
       const name = (d.titles && d.titles.normalized) || title;
-      openSpecial({ kicker, title: name, text: trim(d.extract), thumb: d.thumbnail && d.thumbnail.source, url: pageUrl(d) || wikiUrl(title), tuneTitle: name });
+      openSpecial({ kicker, title: name, text: trim(d.extract), thumb: d.thumbnail && d.thumbnail.source, url: pageUrl(d) || wikiUrl(title), tuneTitle: name, spot });
     }).catch(() => {});
   }
 
@@ -1395,10 +1444,6 @@
     tone(390, 360, t0, 0.32, 0.05, pan);
     tone(400, 370, t0 + 0.5, 0.22, 0.04, pan);
     tone(380, 340, t0 + 0.8, 0.45, 0.045, pan);
-  }
-  function rustle() {
-    if (!sound.on || !sound.ctx || sound.ctx.state !== 'running') return;
-    for (let k = 0; k < 4; k++) setTimeout(() => burst('bandpass', 1500 + Math.random() * 600, 0.6, 0.18, 0.07, 1), k * 110);
   }
   function chime() {
     if (!sound.on || !sound.ctx || sound.ctx.state !== 'running') return;
@@ -1548,7 +1593,7 @@
   function canSeeAt(wx, wy) {
     if (level === 4) return litAt(wx, wy);
     const cx = cam.x + innerWidth / scale / 2, cy = cam.y + innerHeight / scale / 2;
-    return Math.hypot(wx - cx, wy - cy) <= visionRadius();
+    return ovalEdge(wx - cx, wy - cy, visionOval()) <= -FADE / 3;
   }
   const canSee = i => canSeeAt(world.articles[i][2], world.articles[i][3]);
 
@@ -1705,6 +1750,7 @@
 
   // Every card opened gets a token, so late answers for an old card are ignored.
   let cardToken = 0;
+  let cardSpot = null; // where a lantern from this card goes
   const pKicker = $('#panel-kicker');
 
   // opts.clicked: opened by clicking the plant in the forest, so an animal
@@ -1714,6 +1760,7 @@
     closePlant();
     openIdx = i;
     const token = ++cardToken;
+    cardSpot = spotOf(i);
     markSeen(a[0]);
     pKicker.textContent = kicker || '';
     pKicker.hidden = !kicker;
@@ -1753,13 +1800,15 @@
   }
 
   // A card for something that isn't a plant: a well, a bottle, the ancient tree.
-  function openSpecial({ kicker, title, text, thumb, url, tuneTitle }) {
+  function openSpecial({ kicker, title, text, thumb, url, tuneTitle, spot }) {
     closePlant();
     openIdx = -1;
     const token = ++cardToken;
+    cardSpot = spot || null;
     pKicker.textContent = kicker || '';
     pKicker.hidden = !kicker;
-    pBtn.hidden = true;
+    pBtn.hidden = !spot;
+    if (spot) updateLanternButton();
     pTitle.textContent = title;
     offerTune(tuneTitle, token);
     pText.textContent = text || '';
@@ -1791,6 +1840,7 @@
     panel.hidden = true;
     openIdx = -1;
     cardToken++;
+    cardSpot = null;
     stopTune();
     canvas.focus({ preventScroll: true });
   }
@@ -1800,9 +1850,9 @@
   // A lantern: handle, cap, glass (g) and base.
   const LANTERN_ICON = ['..###..', '..#.#..', '.#####.', '.#ggg#.', '.#ggg#.', '.#ggg#.', '.#####.', '..###..'];
   function updateLanternButton() {
-    const a = openIdx >= 0 ? world.articles[openIdx] : null;
-    const leftHere = !!(a && myLanternOn(a[0]));
-    const others = a && lanternGroups.some(g => g.x === a[2] && g.y === a[3]);
+    const sp = cardSpot;
+    const leftHere = !!(sp && myLanternOn(sp.title));
+    const others = sp && lanternGroups.some(g => g.x === Math.round(sp.x) && g.y === Math.round(sp.y));
     const c = pBtn.querySelector('canvas').getContext('2d');
     c.clearRect(0, 0, 7, 8);
     // unlit: dark glass; someone else's: a dim glow; yours: lit, with a flame.
@@ -1821,17 +1871,18 @@
   // L leaves a lantern, or takes yours back: on the open article, else the one
   // under the mouse, else the nearest one you can see.
   function lanternShortcut() {
-    let i = openIdx >= 0 ? openIdx : hovered;
+    if (!panel.hidden && cardSpot) { toggleLantern(cardSpot); return; }
+    let i = hovered;
     if (i < 0) {
       const p = myWorldPos();
       i = nearestArticle(p.x, p.y, level === 4 ? 10 : 16);
       if (i >= 0 && !canSee(i)) i = -1;
     }
     if (i < 0) { toast('walk up to a plant to leave a lantern'); return; }
-    toggleLantern(i);
+    toggleLantern(spotOf(i));
   }
 
-  pBtn.addEventListener('click', () => { if (openIdx >= 0) toggleLantern(openIdx); });
+  pBtn.addEventListener('click', () => { if (cardSpot) toggleLantern(cardSpot); });
 
   // × below the lantern closes the card.
   const pClose = $('#panel-close');
@@ -1992,7 +2043,7 @@
     const halfW = innerWidth / scale / 2 - 2, halfH = innerHeight / scale / 2 - 2;
     const inView = best && (level === 4
       ? Math.abs(best.x - me.x) < halfW && Math.abs(best.y - me.y) < halfH
-      : bd <= visionRadius() - FADE / 2);
+      : ovalEdge(best.x - me.x, best.y - me.y, visionOval()) <= -FADE / 2);
     pointerBox.hidden = !best || inView;
     if (pointerBox.hidden) { pointerKey = ''; return; }
     pointerBox.title = `nearest lantern: about ${Math.max(1, Math.round(bd / 4))} steps`;
