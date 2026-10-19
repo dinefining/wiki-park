@@ -3,8 +3,8 @@
 // Run once with Node 18+:  node prepare.js
 // Collects Wikipedia articles from three seed sets (Nature, Technology,
 // Human individuality), finds articles that bridge them, lays everything out
-// as three overlapping circular biomes with terraced ground, a stream, ponds
-// and thickets, and writes world.json.
+// as one forest: groves and lone plants scattered all over, with terraced
+// ground, rivers, ponds, wilderness paths and thickets, and writes world.json.
 'use strict';
 
 const fs = require('fs');
@@ -101,7 +101,7 @@ const SKIP_CAT = /by (country|continent|year|decade|century|region|state|city|lo
 
 const PER_SET_CAP = 6000;   // candidates per set, before the quality rules
 const TOTAL_CAP = 18000;    // candidates in all
-const FOREST_SIZE = 12000;  // articles that grow, after the rules
+const FOREST_SIZE = 5000;   // articles that grow, after the rules
 const PAGES_PER_CAT = 400;
 const SUBCATS_PER_CAT = 35;
 const PAGES_PER_SUBCAT = 80;
@@ -373,20 +373,16 @@ function colourMix(title, mask, cats) {
 }
 
 // -------------------------------------------------------------- layout -----
+// The park is one big forest: groves of related articles and lone plants are
+// scattered all over it, every theme everywhere. Water, wilderness paths and
+// thickets run between them.
 
 const W = 2080, HGT = 2080;
-const CX = W / 2, CY = HGT / 2 + 20;
-const D = 380, R = 580;
-const CIRCLES = [210, 330, 90].map(deg => {
-  const a = deg * Math.PI / 180;
-  return [Math.round(CX + Math.cos(a) * D), Math.round(CY + Math.sin(a) * D), R];
-});
-const BLOCK = 4;   // terrain is drawn in 4px blocks
-const LONER_SHARE = 0.33; // share of single-theme articles that grow on their own, spread evenly
+const CIRCLES = []; // no theme regions any more; kept so the browser sees none
+const BLOCK = 4;    // terrain is drawn in 4px blocks
 const GW = W / BLOCK, GH = HGT / BLOCK;
+const LONER_SHARE = 0.33; // articles that grow on their own, spread evenly between groves
 
-// Articles grow as flowers, bushes or trees, by how long their Wikipedia article is.
-// Seen from above, flat colour, one pixel apart at least.
 // Three shapes, seen from above:
 //   0 cross   – the shorter articles
 //   1 ring    – articles where the themes mix (hollow in the middle, still clickable)
@@ -403,14 +399,9 @@ const SPRITE_PX = SPRITES.map(rows => {
 });
 
 // Terrain features, stored per block.
-const F_NONE = 0, F_VEG = 1, F_VEG_DEEP = 2, F_WATER = 3, F_WATER_LIGHT = 4, F_SAND = 5;
+const F_NONE = 0, F_VEG = 1, F_VEG_DEEP = 2, F_WATER = 3, F_WATER_LIGHT = 4, F_SAND = 5, F_PATH = 6, F_BRIDGE = 7, F_PATH_FADE = 8;
 const BANDS = 6;
-
-function regionAt(x, y) {
-  let m = 0;
-  CIRCLES.forEach(([cx, cy, r], i) => { if ((x - cx) ** 2 + (y - cy) ** 2 < r * r) m |= 1 << i; });
-  return m;
-}
+const isWet = f => f === F_WATER || f === F_WATER_LIGHT;
 
 function makeNoise(seed) {
   const r = mulberry32(seed);
@@ -430,7 +421,35 @@ function fbm(noise, x, y) {
   return v / tot;
 }
 
-// Elevation terraces, a river with two creeks, ponds and sandy banks.
+// A smooth line through waypoints (Catmull-Rom), sampled every `step`, with a
+// gentle sideways meander that fades out at both ends. Never loops back on
+// itself, because the meander is small next to the distance between waypoints.
+function flowLine(points, step, amp, wavelength) {
+  const pts = [points[0], ...points, points[points.length - 1]];
+  const raw = [];
+  for (let i = 1; i < pts.length - 2; i++) {
+    const [p0, p1, p2, p3] = [pts[i - 1], pts[i], pts[i + 1], pts[i + 2]];
+    const len = Math.hypot(p2[0] - p1[0], p2[1] - p1[1]);
+    const n = Math.max(2, Math.ceil(len / step));
+    for (let k = 0; k < n; k++) {
+      const t = k / n, t2 = t * t, t3 = t2 * t;
+      const f = (a, b, c, d) => 0.5 * (2 * b + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (-a + 3 * b - 3 * c + d) * t3);
+      raw.push([f(p0[0], p1[0], p2[0], p3[0]), f(p0[1], p1[1], p2[1], p3[1])]);
+    }
+  }
+  raw.push(points[points.length - 1]);
+  let total = 0;
+  const dist = raw.map((p, i) => (i ? (total += Math.hypot(p[0] - raw[i - 1][0], p[1] - raw[i - 1][1])) : 0));
+  const phase = rand() * Math.PI * 2;
+  return raw.map((p, i) => {
+    const prev = raw[Math.max(0, i - 1)], next = raw[Math.min(raw.length - 1, i + 1)];
+    const dx = next[0] - prev[0], dy = next[1] - prev[1], l = Math.hypot(dx, dy) || 1;
+    const env = Math.min(1, dist[i] / (wavelength * 0.5), (total - dist[i]) / (wavelength * 0.5));
+    const off = amp * env * Math.sin((dist[i] / wavelength) * Math.PI * 2 + phase);
+    return [p[0] - (dy / l) * off, p[1] + (dx / l) * off, dist[i] / total];
+  });
+}
+
 function makeTerrain() {
   const band = new Uint8Array(GW * GH);
   const feat = new Uint8Array(GW * GH);
@@ -443,51 +462,137 @@ function makeTerrain() {
   }
   for (let i = 0; i < hs.length; i++) band[i] = Math.min(BANDS - 1, Math.floor(((hs[i] - lo) / (hi - lo)) * BANDS));
 
-  const stamp = (cx, cy, r) => {
+  const stamp = (cx, cy, r, f = F_WATER) => {
     for (let y = Math.floor(cy - r - 1); y <= cy + r + 1; y++) for (let x = Math.floor(cx - r - 1); x <= cx + r + 1; x++) {
       if (x < 0 || y < 0 || x >= GW || y >= GH) continue;
-      if ((x + 0.5 - cx) ** 2 + (y + 0.5 - cy) ** 2 <= r * r) feat[y * GW + x] = F_WATER;
+      if ((x + 0.5 - cx) ** 2 + (y + 0.5 - cy) ** 2 <= r * r) feat[y * GW + x] = f;
     }
   };
-  const stream = (points, r) => {
-    let [x, y] = points[0];
-    let a = Math.atan2(points[1][1] - y, points[1][0] - x), turn = 0;
-    for (let k = 1; k < points.length; k++) {
-      const [tx, ty] = points[k];
-      for (let step = 0; step < 1500 && Math.hypot(tx - x, ty - y) > 2; step++) {
-        let da = Math.atan2(ty - y, tx - x) - a;
-        while (da > Math.PI) da -= 2 * Math.PI;
-        while (da < -Math.PI) da += 2 * Math.PI;
-        turn = turn * 0.92 + (rand() - 0.5) * 0.1;
-        a += turn + da * 0.05;
-        x += Math.cos(a) * 0.7; y += Math.sin(a) * 0.7;
-        stamp(x, y, r * (0.9 + rand() * 0.2));
-      }
-    }
+  // Rivers: width swells and narrows a little along the way.
+  // Rivers: width swells and narrows a little along the way. Their centre
+  // lines are kept so bridges can cross them square-on.
+  const rivers = [];
+  const river = (points, width, amp, wavelength) => {
+    const line = flowLine(points, 0.5, amp, wavelength);
+    for (const [x, y, t] of line) stamp(x, y, width * (0.85 + 0.25 * Math.sin(t * 9 + width)));
+    rivers.push(line);
   };
   const pond = (cx, cy, r) => {
     for (let k = 0; k < 9; k++) stamp(cx + (rand() - 0.5) * r * 1.4, cy + (rand() - 0.5) * r, r * (0.55 + rand() * 0.35));
   };
 
-  // The river runs through the nature biome; creeks feed ponds in technology and human.
-  stream([[216, -3], [192, 100], [150, 210], [132, 320], [80, 430], [36, GH + 3]], 2.4);
-  stream([[428, -3], [404, 80], [352, 140]], 1.2);
-  pond(344, 150, 9);
-  stream([[GW + 3, 404], [430, 420], [330, 444]], 1.1);
-  pond(318, 446, 7);
-  for (const [x, y, r] of [[196, 452, 6], [428, 300, 6], [120, 150, 7], [262, 116, 5], [380, 250, 5], [90, 330, 6], [250, 300, 4], [460, 200, 5]]) pond(x, y, r);
+  // A river across the park from north to south, a creek joining it from the
+  // east, and a second stream that ends in a lake.
+  river([[150, -4], [182, 110], [138, 240], [205, 372], [168, GH + 4]], 3.2, 6, 70);
+  river([[GW + 4, 150], [420, 176], [330, 212], [240, 236], [170, 244], [134, 246]], 1.7, 4, 46);
+  river([[GW + 4, 432], [440, 418], [380, 404]], 1.6, 3, 40);
+  pond(366, 402, 11);
+  // Ponds scattered here and there.
+  for (let k = 0, placed = 0; k < 200 && placed < 7; k++) {
+    const x = 40 + rand() * (GW - 80), y = 40 + rand() * (GH - 80);
+    let clear = true;
+    for (let dy = -16; dy <= 16 && clear; dy += 4) for (let dx = -16; dx <= 16 && clear; dx += 4) {
+      const xx = Math.round(x + dx), yy = Math.round(y + dy);
+      if (xx >= 0 && yy >= 0 && xx < GW && yy < GH && isWet(feat[yy * GW + xx])) clear = false;
+    }
+    if (!clear) continue;
+    pond(x, y, 3 + rand() * 3.5);
+    placed++;
+  }
 
-  const isWater = f => f === F_WATER || f === F_WATER_LIGHT;
   for (let y = 1; y < GH - 1; y++) for (let x = 1; x < GW - 1; x++) {
     const i = y * GW + x;
-    if (feat[i] === F_WATER && [[1, 0], [-1, 0], [0, 1], [0, -1]].every(([dx, dy]) => isWater(feat[(y + dy) * GW + x + dx])) && rand() < 0.08) feat[i] = F_WATER_LIGHT;
+    if (feat[i] === F_WATER && [[1, 0], [-1, 0], [0, 1], [0, -1]].every(([dx, dy]) => isWet(feat[(y + dy) * GW + x + dx])) && rand() < 0.08) feat[i] = F_WATER_LIGHT;
   }
   for (let y = 1; y < GH - 1; y++) for (let x = 1; x < GW - 1; x++) {
     const i = y * GW + x;
     if (feat[i] !== F_NONE) continue;
-    if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => isWater(feat[(y + dy) * GW + x + dx])) && rand() < 0.32) feat[i] = F_SAND;
+    if ([[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => isWet(feat[(y + dy) * GW + x + dx])) && rand() < 0.32) feat[i] = F_SAND;
   }
-  return { band, feat };
+  return { band, feat, rivers };
+}
+
+// Wilderness paths: a few long, wide trails between far-apart groves (a tree
+// of trails plus the odd loop). They taper off at each end, narrowing and
+// fading into the grass. Where a trail meets a river it crosses on a plank
+// bridge laid straight across, square to the banks.
+function makePaths(terrain, groves) {
+  const { feat, rivers } = terrain;
+  const hubs = [];
+  for (const g of groves) {
+    if (hubs.every(h => Math.hypot(h.x - g.x, h.y - g.y) > 440)) hubs.push(g);
+  }
+  const d = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  const edges = [];
+  const inTree = new Set([0]);
+  while (inTree.size < hubs.length) {
+    let best = null;
+    for (const i of inTree) for (let j = 0; j < hubs.length; j++) {
+      if (inTree.has(j)) continue;
+      const dd = d(hubs[i], hubs[j]);
+      if (!best || dd < best[2]) best = [i, j, dd];
+    }
+    inTree.add(best[1]);
+    edges.push(best);
+  }
+  for (let i = 0; i < hubs.length; i++) {
+    if (rand() > 0.06) continue;
+    const near = hubs.map((h, j) => [j, d(hubs[i], h)]).filter(([j]) => j !== i).sort((a, b) => a[1] - b[1]);
+    const [j, dd] = near[1] || [];
+    if (j !== undefined && dd < 700 && !edges.some(e => (e[0] === i && e[1] === j) || (e[0] === j && e[1] === i))) edges.push([i, j, dd]);
+  }
+
+  const wetNear = (x, y, r) => {
+    for (let yy = Math.floor(y - r); yy <= y + r; yy++) for (let xx = Math.floor(x - r); xx <= x + r; xx++) {
+      if (xx >= 0 && yy >= 0 && xx < GW && yy < GH && isWet(feat[yy * GW + xx])) return true;
+    }
+    return false;
+  };
+  // Stamp a round brush of path. Faded path never covers full path, and
+  // nothing is stamped on water.
+  const brush = (x, y, r, kind) => {
+    for (let yy = Math.floor(y - r); yy <= y + r; yy++) for (let xx = Math.floor(x - r); xx <= x + r; xx++) {
+      if (xx < 0 || yy < 0 || xx >= GW || yy >= GH) continue;
+      if ((xx + 0.5 - x) ** 2 + (yy + 0.5 - y) ** 2 > r * r + 0.25) continue;
+      const k = yy * GW + xx, f = feat[k];
+      if (isWet(f) || f === F_PATH) continue;
+      if (kind === F_PATH_FADE && f === F_PATH_FADE) continue;
+      feat[k] = kind;
+    }
+  };
+
+  // No bridges: where a trail meets water it splits, and each dry stretch
+  // fades in and out on its own, so trails trail off near the banks and pick
+  // up again across the water. Short stretches are left out.
+  const WIDE = 1.7;        // brush radius in blocks: trails 3-4 blocks across
+  const MIN_STRETCH = 60;  // samples (half a block each): at least 30 blocks long
+  let stretches = 0;
+  for (const [i, j] of edges) {
+    const a = hubs[i], b = hubs[j];
+    const len = d(a, b), ux = (b.x - a.x) / len, uy = (b.y - a.y) / len;
+    // Run from just inside one grove's edge to the other's, so the fading
+    // ends trail into the clearings.
+    const s0 = [(a.x + ux * a.r * 0.6) / BLOCK, (a.y + uy * a.r * 0.6) / BLOCK];
+    const e0 = [(b.x - ux * b.r * 0.6) / BLOCK, (b.y - uy * b.r * 0.6) / BLOCK];
+    const mid = [(s0[0] + e0[0]) / 2 + (rand() - 0.5) * len / BLOCK * 0.25, (s0[1] + e0[1]) / 2 + (rand() - 0.5) * len / BLOCK * 0.25];
+    const parts = [];
+    let cur = [];
+    for (const p of flowLine([s0, mid, e0], 0.5, 3, 40)) {
+      if (wetNear(p[0], p[1], 4)) { if (cur.length) parts.push(cur); cur = []; }
+      else cur.push(p);
+    }
+    if (cur.length) parts.push(cur);
+    for (const part of parts) {
+      if (part.length < MIN_STRETCH) continue;
+      for (let k = 0; k < part.length; k++) {
+        const t = k / (part.length - 1);
+        const end = Math.min(1, Math.min(t, 1 - t) / 0.18); // 0 at the very ends, 1 along the middle
+        brush(part[k][0], part[k][1], WIDE * (0.35 + 0.65 * end), end < 0.55 ? F_PATH_FADE : F_PATH);
+      }
+      stretches++;
+    }
+  }
+  return { hubs: hubs.length, trails: edges.length, stretches };
 }
 
 function makeLayout(list, terrain) {
@@ -495,15 +600,15 @@ function makeLayout(list, terrain) {
   const dry = (x, y) => {
     const bx = Math.floor(x / BLOCK), by = Math.floor(y / BLOCK);
     if (bx < 0 || by < 0 || bx >= GW || by >= GH) return false;
-    return feat[by * GW + bx] === F_NONE;
+    return feat[by * GW + bx] === F_NONE && !besideTrail[by * GW + bx];
   };
   // Pixels taken by a plant or the one-pixel gap around it.
   const taken = new Uint8Array(W * HGT);
-  const fits = (cx, cy, size, mask) => {
-    if (regionAt(cx, cy) !== mask) return false;
+  const besideTrail = new Uint8Array(GW * GH);
+  const fits = (cx, cy, size) => {
     for (const [dx, dy] of SPRITE_PX[size]) {
       const x = cx + dx, y = cy + dy;
-      if (x < 2 || y < 2 || x >= W - 2 || y >= HGT - 2 || taken[y * W + x] || !dry(x, y)) return false;
+      if (x < 24 || y < 24 || x >= W - 24 || y >= HGT - 24 || taken[y * W + x] || !dry(x, y)) return false;
     }
     return true;
   };
@@ -513,61 +618,75 @@ function makeLayout(list, terrain) {
     }
   };
 
-  const byMask = new Map();
-  for (const e of list) {
-    if (!byMask.has(e.mask)) byMask.set(e.mask, []);
-    byMask.get(e.mask).push(e);
+  // Groves keep related articles together (same source category); which
+  // theme they're about doesn't decide where they grow.
+  const sorted = list.slice().sort((a, b) => (a.group < b.group ? -1 : a.group > b.group ? 1 : a.title < b.title ? -1 : 1));
+  const loners = [], chunks = [];
+  let cur = [], target = 10 + Math.floor(rand() * 16);
+  for (const e of sorted) {
+    if (rand() < LONER_SHARE) { loners.push(e); continue; }
+    if (cur.length >= target || (cur.length >= 8 && cur[cur.length - 1].group !== e.group)) {
+      chunks.push(cur); cur = []; target = 10 + Math.floor(rand() * 16);
+    }
+    cur.push(e);
+  }
+  if (cur.length) chunks.push(cur);
+  shuffle(chunks);
+
+  // Grove centres: each the best of a few random dry spots (farthest from the
+  // groves so far), so they spread over the whole park without a pattern.
+  const groves = chunks.map(chunk => {
+    const spread = 3.0 * Math.sqrt(chunk.length) + 3;
+    return { chunk, spread, r: spread * 1.6 + 3 };
+  });
+  const placedGroves = [];
+  for (const g of groves) {
+    let best = null, bestD = -1;
+    for (let c = 0, tries = 0; c < 6 && tries < 3000; tries++) {
+      const x = 60 + rand() * (W - 120), y = 60 + rand() * (HGT - 120);
+      if (!dry(x, y)) continue;
+      c++;
+      let nearest = 1e9;
+      for (const p of placedGroves) nearest = Math.min(nearest, Math.hypot(p.x - x, p.y - y));
+      if (nearest > bestD) { bestD = nearest; best = [x, y]; }
+    }
+    if (!best) continue;
+    g.x = Math.round(best[0]); g.y = Math.round(best[1]);
+    placedGroves.push(g);
   }
 
-  const groves = [];
+  const paths = makePaths(terrain, placedGroves);
+  // Keep a strip of grass beside every trail: no plant within a block of one.
+  for (let by = 0; by < GH; by++) for (let bx = 0; bx < GW; bx++) {
+    let near = 0;
+    for (let oy = -1; oy <= 1 && !near; oy++) for (let ox = -1; ox <= 1; ox++) {
+      const f = feat[Math.min(GH - 1, Math.max(0, by + oy)) * GW + Math.min(GW - 1, Math.max(0, bx + ox))];
+      if (f === F_PATH || f === F_PATH_FADE) { near = 1; break; }
+    }
+    besideTrail[by * GW + bx] = near;
+  }
+
   const articles = [];
   let dropped = 0;
-
-  // About one single-set article in eight grows on its own out in the meadows,
-  // so long stretches between groves aren't completely empty.
-  const loners = [];
-  for (const [mask, all] of [...byMask.entries()].sort((a, b) => a[0] - b[0])) {
-    all.sort((a, b) => (a.group < b.group ? -1 : a.group > b.group ? 1 : a.title < b.title ? -1 : 1));
-    const items = [];
-    for (const e of all) (popcount(mask) === 1 && rand() < LONER_SHARE ? loners : items).push(e);
-    // Chunk into groves, preferring to break where the source category changes.
-    const chunks = [];
-    let cur = [];
-    const maxSize = popcount(mask) === 3 ? 18 : 30;
-    for (const e of items) {
-      if (cur.length >= maxSize || (cur.length >= 12 && cur[cur.length - 1].group !== e.group)) {
-        chunks.push(cur); cur = [];
+  for (const g of placedGroves) {
+    let far = 0;
+    g.chunk.sort((a, b) => b.size - a.size); // the big ones get room near the middle
+    for (const e of g.chunk) {
+      let placed = false;
+      for (let tries = 0, s = g.spread * 0.6; tries < 900 && !placed; tries++, s += 0.06) {
+        const x = Math.round(g.x + gauss() * s), y = Math.round(g.y + gauss() * s);
+        if (!fits(x, y, e.size)) continue;
+        take(x, y, e.size);
+        articles.push([e.title, e.mask, x, y, ...e.mix, e.size]);
+        far = Math.max(far, Math.hypot(x - g.x, y - g.y) + 3);
+        placed = true;
       }
-      cur.push(e);
+      if (!placed) dropped++;
     }
-    if (cur.length) chunks.push(cur);
-
-    let prev = null;
-    for (const chunk of chunks) {
-      const spread = 3.0 * Math.sqrt(chunk.length) + 3;
-      const center = findGroveCenter(mask, spread, prev, groves, dry);
-      prev = center;
-      const grove = { x: center[0], y: center[1], r: 0 };
-      // Trees first, so the big ones get room near the middle.
-      chunk.sort((a, b) => b.size - a.size);
-      for (const e of chunk) {
-        let placed = false;
-        for (let tries = 0, s = spread * 0.6; tries < 900 && !placed; tries++, s += 0.06) {
-          const x = Math.round(grove.x + gauss() * s), y = Math.round(grove.y + gauss() * s);
-          if (!fits(x, y, e.size, mask)) continue;
-          take(x, y, e.size);
-          articles.push([e.title, mask, x, y, ...e.mix, e.size]);
-          grove.r = Math.max(grove.r, Math.hypot(x - grove.x, y - grove.y) + e.size + 1);
-          placed = true;
-        }
-        if (!placed) dropped++;
-      }
-      grove.r += 3;
-      groves.push(grove);
-    }
+    g.r = far + 3;
   }
-  // Loners: in their own region, each in the emptiest of a dozen candidate
-  // spots (farthest from any plant so far), so they spread out evenly.
+
+  // Loners: each in the emptiest of a dozen candidate spots, so they fill the gaps evenly.
   const CELL = 32, cols = Math.ceil(W / CELL), cells = new Map();
   const remember = (x, y) => {
     const k = Math.floor(x / CELL) + Math.floor(y / CELL) * cols;
@@ -578,8 +697,8 @@ function makeLayout(list, terrain) {
     let best = 1e9;
     const cx = Math.floor(x / CELL), cy = Math.floor(y / CELL);
     for (let oy = -2; oy <= 2; oy++) for (let ox = -2; ox <= 2; ox++) {
-      const list = cells.get(cx + ox + (cy + oy) * cols);
-      if (list) for (let i = 0; i < list.length; i += 2) best = Math.min(best, Math.hypot(list[i] - x, list[i + 1] - y));
+      const l = cells.get(cx + ox + (cy + oy) * cols);
+      if (l) for (let i = 0; i < l.length; i += 2) best = Math.min(best, Math.hypot(l[i] - x, l[i + 1] - y));
     }
     return best;
   };
@@ -588,60 +707,34 @@ function makeLayout(list, terrain) {
     let best = null, bestD = -1;
     for (let c = 0, tries = 0; c < 12 && tries < 4000; tries++) {
       const x = Math.round(30 + rand() * (W - 60)), y = Math.round(30 + rand() * (HGT - 60));
-      if (!fits(x, y, e.size, e.mask)) continue;
+      if (!fits(x, y, e.size)) continue;
       c++;
-      const d = nearestPlant(x, y);
-      if (d > bestD) { bestD = d; best = [x, y]; }
+      const dd = nearestPlant(x, y);
+      if (dd > bestD) { bestD = dd; best = [x, y]; }
     }
     if (!best) { dropped++; continue; }
     take(best[0], best[1], e.size);
     remember(best[0], best[1]);
     articles.push([e.title, e.mask, best[0], best[1], ...e.mix, e.size]);
   }
-  console.log(`  ${loners.length} articles grow alone in the meadows`);
+  console.log(`  ${loners.length} articles grow on their own; ${paths.trails} trails link ${paths.hubs} groves, in ${paths.stretches} stretches`);
   if (dropped) console.log(`  (${dropped} articles found no room)`);
-  return { articles, groves };
+  return { articles, groves: placedGroves };
 }
 
-function findGroveCenter(mask, spread, prev, groves, dry) {
-  let minDist = 40 + spread * 2.2;
-  for (let attempt = 0; ; attempt++) {
-    if (attempt > 0 && attempt % 400 === 0) minDist = Math.max(10, minDist - 5);
-    let x, y;
-    if (prev && attempt < 200) {
-      const a = rand() * Math.PI * 2, d = minDist + rand() * 30;
-      x = prev[0] + Math.cos(a) * d; y = prev[1] + Math.sin(a) * d;
-    } else {
-      x = 40 + rand() * (W - 80); y = 40 + rand() * (HGT - 80);
-    }
-    if (regionAt(x, y) !== mask || !dry(x, y)) continue;
-    const ring = spread * 1.4 + 4;
-    let ok = true;
-    for (let k = 0; k < 8 && ok; k++) {
-      const a = k * Math.PI / 4;
-      const px = x + Math.cos(a) * ring, py = y + Math.sin(a) * ring;
-      if (regionAt(px, py) !== mask || !dry(px, py)) ok = false;
-    }
-    if (!ok && attempt < 3000) continue;
-    if (groves.some(g => Math.hypot(g.x - x, g.y - y) < minDist + g.r * 0.5) && attempt < 3000) continue;
-    return [Math.round(x), Math.round(y)];
-  }
-}
-
-// Thickets: blocky clumps of undergrowth in the meadows, thickest around the
-// edges of groves, never right next to a plant so the groves stay clearings.
+// Thickets: blocky clumps of undergrowth in the open, thickest around the
+// edges of groves, never right next to a plant or on a path.
 function addVegetation(terrain, articles, groves) {
   const { feat } = terrain;
   const near = new Uint8Array(GW * GH);
   for (const a of articles) {
-    const reach = a[7] + 4;
+    const reach = 5;
     for (let y = Math.floor((a[3] - reach) / BLOCK); y <= Math.floor((a[3] + reach) / BLOCK); y++) {
       for (let x = Math.floor((a[2] - reach) / BLOCK); x <= Math.floor((a[2] + reach) / BLOCK); x++) {
         if (x >= 0 && y >= 0 && x < GW && y < GH) near[y * GW + x] = 1;
       }
     }
   }
-  // Nearest-grove lookup on a coarse grid keeps this fast with hundreds of groves.
   const CELLB = 16;
   const buckets = new Map();
   groves.forEach(g => {
@@ -669,14 +762,14 @@ function addVegetation(terrain, articles, groves) {
   return count / (GW * GH);
 }
 
-const B36 = '0123456789abcdefghijklmnopqrstuvwxyz';
+// One character per block: band + BANDS × feature, from a 62-letter alphabet.
+const ALPHABET = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
 function encodeTerrain({ band, feat }) {
   let s = '';
-  for (let i = 0; i < band.length; i++) s += B36[band[i] + BANDS * feat[i]];
+  for (let i = 0; i < band.length; i++) s += ALPHABET[band[i] + BANDS * feat[i]];
   return s;
 }
 
-// Sizes by article length: about half flowers, a third bushes, the longest sixth trees.
 // Shapes: a ring where the themes mix (more than one colour), a diamond for
 // the longest third of the rest, a cross for everything else.
 function assignShapes(list) {
@@ -763,6 +856,7 @@ function assignShapes(list) {
     sets: SET_NAMES,
     circles: CIRCLES,
     terrain: encodeTerrain(terrain),
+    terrainAlphabet: ALPHABET, // features: 0 ground, 1-2 thicket, 3-4 water, 5 sand, 6 path, 8 path fading out
     sprites: SPRITES,
     diamondBytes, // article length (bytes) from which a single-theme article is a diamond
     articles, // [title, mask, centreX, centreY, n, t, h, size]

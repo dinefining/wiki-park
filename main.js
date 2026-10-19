@@ -3,7 +3,7 @@
   'use strict';
 
   // Bump with index.html's ?v= tags when you publish changes, so browsers fetch fresh files.
-  const VERSION = '2026-10-20b';
+  const VERSION = '2026-10-23a';
   const CFG = window.WIKIPARK_CONFIG || {};
   const $ = s => document.querySelector(s);
   const canvas = $('#world');
@@ -41,6 +41,10 @@
   const VEG = [0, 112, 4], VEG_DEEP = [0, 92, 4];
   const WATER = hex('#2c6c9c'), WATER_LIGHT = hex('#4c8cbc');
   const SAND = hex('#be9b65');
+  const PATH = hex('#a08a5e'), BRIDGE = hex('#8a6a44');
+  // Lily pads: p/P pad, f flower.
+  const SCENERY_COLOURS = { p: '#4f8f3c', P: '#6aa84e', f: '#f2d6e8' };
+  const SCENERY = { lilies: [['Pp', 'p.'], ['pP', '.p'], ['Pf', 'pp'], ['pPp', 'pp.']] };
   // Articles: a mix of pine green (nature), blue spruce (technology) and
   // heather (human individuality), in quarters. Flowers are paler, like
   // blossoms; trees darker, like canopies.
@@ -121,40 +125,6 @@
     return out;
   }
 
-  // Your circle of view by day: inside, everything; at its edge the world
-  // fades out over a few dithered steps into the dark you'd see at night.
-  // The view is an oval that fits the screen with the same margin on every
-  // side, so it follows any screen shape. The fade runs inward from its edge.
-  const VISION_MARGIN = 0.015; // of the screen's shorter side, dim beyond the oval
-  const FADE = 11;           // world pixels from fully seen to unseen
-  const FAR_STEPS = 5;       // tones in between
-  // Fade steps, then (last) the world beyond the oval: very dim, but not gone.
-  const FAR_FACTOR = [1, 0.8, 0.63, 0.48, 0.36, 0.27, 0.2];
-  function visionOval() {
-    const hw = innerWidth / scale / 2, hh = innerHeight / scale / 2;
-    const m = VISION_MARGIN * Math.min(hw, hh) * 2;
-    return { a: Math.max(8, hw - m), b: Math.max(8, hh - m) };
-  }
-  // Signed distance in world pixels from the oval's edge (negative inside),
-  // measured along the line from the centre, so the fade is even all round.
-  function ovalEdge(dx, dy, o) {
-    const r = Math.sqrt((dx / o.a) ** 2 + (dy / o.b) ** 2);
-    if (r === 0) return -Math.min(o.a, o.b);
-    return (r - 1) * (Math.hypot(dx, dy) / r);
-  }
-  const farMaps = FAR_FACTOR.map(() => new Map());
-  function far(p, step) {
-    const m = farMaps[step];
-    let out = m.get(p);
-    if (out === undefined) {
-      const [r, g, b] = rgbOf(p), f = FAR_FACTOR[step];
-      const q = v => Math.round((v * f) / 4) * 4;
-      out = u32([q(r), q(g) + (step > 2 ? 4 : 0), q(b)]);
-      m.set(p, out);
-    }
-    return out;
-  }
-
   // At night everything outside a light is one flat, almost-black green.
   const NIGHT = [0, 20, 4];
   const NIGHT_U32 = u32(NIGHT);
@@ -162,14 +132,16 @@
   const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map(v => (v + 0.5) / 16);
 
   // Cursor sprite, 5x7.
+  // Other walkers: a clean pointer arrowhead, no tail.
   const ARROW = [
-    '1....',
-    '11...',
-    '111..',
-    '1111.',
-    '11111',
-    '.11..',
-    '..11.',
+    '1.....',
+    '11....',
+    '111...',
+    '1111..',
+    '11111.',
+    '111111',
+    '11....',
+    '1.....',
   ];
 
   // -------------------------------------------------------------- world ---
@@ -189,8 +161,8 @@
     const res = await fetch(`world.json?v=${VERSION}`);
     if (!res.ok) throw new Error(`world.json: HTTP ${res.status}`);
     world = await res.json();
+    buildGrid();   // first, so the scenery drawn with the ground can keep clear of plants
     buildGround();
-    buildGrid();
   }
 
   function regionAt(x, y) {
@@ -221,10 +193,15 @@
     }
     const PEBBLE = u32(hex('#9aa08e')), PEBBLE_DARK = u32(hex('#7c8274'));
     // Water is drawn flat here; small moving glints are added each frame.
-    const featPal = [0, u32(VEG), u32(VEG_DEEP), u32(WATER), u32(WATER), u32(SAND)];
+    // Features: 1-2 thicket, 3-4 water, 5 sand, 6 path, 7 bridge.
+    const featPal = [0, u32(VEG), u32(VEG_DEEP), u32(WATER), u32(WATER), u32(SAND), u32(PATH), u32(BRIDGE)];
+    const PATH_LIGHT = u32(hex('#b29c6e')), PATH_DARK = u32(hex('#8c7650')), PLANK_GAP = u32(hex('#6c5034'));
     const wallPal = [u32(VEG_DEEP), u32([0, 78, 6]), u32([0, 66, 10]), u32(VEG_DEEP)];
     const cells = terrainCells = new Uint8Array(terrain.length);
-    for (let i = 0; i < terrain.length; i++) cells[i] = parseInt(terrain[i], 36);
+    const alphabet = world.terrainAlphabet || '0123456789abcdefghijklmnopqrstuvwxyz';
+    const code = {};
+    [...alphabet].forEach((ch, i) => { code[ch] = i; });
+    for (let i = 0; i < terrain.length; i++) cells[i] = code[terrain[i]];
     // Moisture per block, from two layers of smooth noise.
     const moisture = new Uint8Array(cells.length);
     for (let by = 0; by < world.gh; by++) for (let bx = 0; bx < gw; bx++) {
@@ -238,9 +215,15 @@
         const ci = row + Math.floor(x / block);
         const cell = cells[ci];
         const feat = Math.floor(cell / bands);
-        if (feat) { px[y * w + x] = featPal[feat]; continue; }
+        if (feat && feat !== 8) {
+          let col = featPal[feat];
+          // Paths: packed earth with lighter and darker grit.
+          if (feat === 6) { const t = hash3(x, y, 21); col = t < 0.12 ? PATH_LIGHT : t < 0.22 ? PATH_DARK : col; }
+          px[y * w + x] = col;
+          continue;
+        }
         let m = 0;
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < c.length; i++) {
           const dx = x - c[i][0], dy = y - c[i][1];
           if (dx * dx + dy * dy < c[i][2] * c[i][2]) m |= 1 << i;
         }
@@ -253,9 +236,12 @@
         if (pb < 0.0016) col = PEBBLE;
         else if (pb < 0.0026) col = PEBBLE_DARK;
         else if (k === 2 && hash3(x >> 1, y >> 1, 13) < 0.05) col = moss[base];
+        // Where a trail fades out, earth and grass mix pixel by pixel.
+        if (feat === 8) { const f = hash3(x, y, 23); if (f < 0.42) col = f < 0.06 ? PATH_DARK : featPal[6]; }
         px[y * w + x] = col;
       }
     }
+    addScenery(px, w, h);
     // A ragged band of forest wall along the world's edge.
     for (let by = 0; by < world.gh; by++) for (let bx = 0; bx < gw; bx++) {
       const d = Math.min(bx, by, gw - 1 - bx, world.gh - 1 - by);
@@ -274,6 +260,47 @@
       tc.fillRect(bx * 4, by * 4, 4, 4);
     }
     wallPattern = ctx.createPattern(tile, 'repeat');
+  }
+
+  // Lily pads on the water: scenery, never clickable. Placed from a fixed seed
+  // so everyone sees the same.
+  function addScenery(px, w, h) {
+    const rng = seeded(777);
+    const featAt = (x, y) => {
+      const bx = Math.floor(x / world.block), by = Math.floor(y / world.block);
+      if (bx < 0 || by < 0 || bx >= world.gw || by >= world.gh) return -1;
+      return Math.floor(terrainCells[by * world.gw + bx] / world.bands);
+    };
+    const colours = {};
+    for (const [k, v] of Object.entries(SCENERY_COLOURS)) colours[k] = u32(hex(v));
+    // Fits if every pixel (plus a one-pixel margin) is free and on allowed ground.
+    const fits = (rows, x0, y0, allowed) => {
+      for (let y = -1; y <= rows.length; y++) for (let x = -1; x <= rows[0].length; x++) {
+        const X = x0 + x, Y = y0 + y;
+        if (X < 8 || Y < 8 || X >= w - 8 || Y >= h - 8 || taken[Y * w + X]) return false;
+        const inside = y >= 0 && x >= 0 && y < rows.length && x < rows[0].length && rows[y][x] !== '.';
+        if (inside && !allowed(featAt(X, Y))) return false;
+      }
+      return true;
+    };
+    const put = (rows, x0, y0, claim) => {
+      rows.forEach((row, y) => [...row].forEach((ch, x) => {
+        if (ch === '.') return;
+        px[(y0 + y) * w + x0 + x] = colours[ch];
+        if (claim) taken[(y0 + y) * w + x0 + x] = 1;
+      }));
+    };
+    const scatter = (count, tries, pick, allowed, claim) => {
+      for (let n = 0, t = 0; n < count && t < tries; t++) {
+        const rows = pick();
+        const x = Math.floor(16 + rng() * (w - 32)), y = Math.floor(16 + rng() * (h - 32));
+        if (!fits(rows, x, y, allowed)) continue;
+        put(rows, x, y, claim);
+        n++;
+      }
+    };
+    const wet = f => f === 3 || f === 4;
+    scatter(260, 60000, () => SCENERY.lilies[Math.floor(rng() * SCENERY.lilies.length)], wet, false);
   }
 
   function buildGrid() {
@@ -539,10 +566,25 @@
 
   // L or the card's lantern icon: leave one, or take back your own.
   const spotOf = i => ({ title: world.articles[i][0], x: world.articles[i][2], y: world.articles[i][3] });
+  // Three lanterns a day. Counted from your own lanterns left today, so taking
+  // one back gives it back to you.
+  const DAILY_LANTERNS = 3;
+  function lanternsLeftToday() {
+    const today = new Date().toDateString();
+    let used = 0;
+    for (const id of mine.keys()) {
+      const l = lanterns.get(id);
+      if (l && new Date(l.created_at).toDateString() === today) used++;
+    }
+    return Math.max(0, DAILY_LANTERNS - used);
+  }
   function toggleLantern(spot) {
     const own = myLanternOn(spot.title);
-    if (own) { takeBackLantern(own); toast(`lantern taken back: ${spotName(spot.title)}`); }
-    else { leaveLantern(spot); toast(`lantern left: ${spotName(spot.title)}`); }
+    if (own) { takeBackLantern(own); toast(`lantern taken back: ${spotName(spot.title)}`); return; }
+    const left = lanternsLeftToday();
+    if (!left) { toast('you have left your three lanterns for today'); return; }
+    leaveLantern(spot);
+    toast(`lantern left: ${spotName(spot.title)} · ${left - 1} left today`);
   }
 
   // ----------------------------------------------------------- planting ---
@@ -564,8 +606,19 @@
       if (x < 2 || y < 2 || x >= world.w - 2 || y >= world.h - 2 || taken[y * world.w + x]) return false;
       const cell = terrainCells[Math.floor(y / world.block) * world.gw + Math.floor(x / world.block)];
       if (Math.floor(cell / world.bands) > 2) return false;
+      if (besideTrail(x, y)) return false;
     }
     return true;
+  }
+  // Within a block of a trail: plants keep a strip of grass beside every path.
+  function besideTrail(x, y) {
+    for (const [dx, dy] of [[-4, 0], [4, 0], [0, -4], [0, 4], [-4, -4], [4, 4], [-4, 4], [4, -4]]) {
+      const bx = Math.floor((x + dx) / world.block), by = Math.floor((y + dy) / world.block);
+      if (bx < 0 || by < 0 || bx >= world.gw || by >= world.gh) continue;
+      const f = Math.floor(terrainCells[by * world.gw + bx] / world.bands);
+      if (f === 6 || f === 8) return true;
+    }
+    return false;
   }
 
   function addPlanting(p) {
@@ -856,42 +909,20 @@
             }
           }
         }
-        // Your oval of view. Towards its edge the world fades out in dithered
-        // steps over FADE pixels, and past it there's nothing, as at night.
-        const ccx = cam.x - ix + innerWidth / scale / 2, ccy = cam.y - iy + innerHeight / scale / 2;
-        const oval = visionOval();
-        const ia = 1 / (oval.a - FADE) ** 2, ib = 1 / (oval.b - FADE) ** 2;
-        for (let y = 0; y < vh; y++) {
-          const by = (y & 3) * 4, dy = y + 0.5 - ccy;
-          for (let x = 0; x < vw; x++) {
-            const i = y * vw + x;
-            let p = px[i];
-            const dx = x + 0.5 - ccx;
-            let step = 0;
-            if (dx * dx * ia + dy * dy * ib > 1) { // outside the fully seen part
-              const t = (ovalEdge(dx, dy, oval) + FADE) / FADE; // 0 where the fade starts, 1 at the edge
-              step = Math.floor(t * FAR_STEPS + BAYER[by + (x & 3)]);
-              if (step > FAR_STEPS) {
-                let q = p;
-                if (haloBuf[i] >= 0) q = warmth(q, haloBuf[i]);
-                if (level > 0) q = shift(q, level);
-                px[i] = far(q, FAR_STEPS + 1);
-                continue;
-              }
-            }
-            if (WARM.has(p)) continue;
-            if (haloBuf[i] >= 0) p = warmth(p, haloBuf[i]);
-            if (level > 0) p = shift(p, level);
-            if (step > 0) p = far(p, step);
-            px[i] = p;
-          }
+        // By day you see the whole screen.
+        for (let i = 0; i < px.length; i++) {
+          let p = px[i];
+          if (WARM.has(p)) continue;
+          if (haloBuf[i] >= 0) p = warmth(p, haloBuf[i]);
+          if (level > 0) p = shift(p, level);
+          px[i] = p;
         }
       } else {
         lightBuf.fill(0);
         warmBuf.fill(-1);
         toneBuf.fill(1);
         const me = myWorldPos();
-        addLight(me.x - ix, me.y - iy, 10, -1);
+        addLight(me.x - ix, me.y - iy, 11, -1);
         for (const o of others.values()) addLight(o.x - ix, o.y - iy, 5, -1);
         for (const g of visibleLanterns) {
           addLight(g.x + 0.5 - ix, g.y + 0.5 - iy, g.r + 1 + Math.sin(ft / 480 + g.x * 0.7) * 0.7, g.tier);
@@ -1037,7 +1068,7 @@
       if (cx < -6 || cy < -8 || cx > people.width || cy > people.height) continue;
       pctx.fillStyle = o.tint;
       for (let r = 0; r < ARROW.length; r++) {
-        for (let c = 0; c < 5; c++) if (ARROW[r][c] === '1') pctx.fillRect(cx + c, cy + r, 1, 1);
+        for (let c = 0; c < ARROW[r].length; c++) if (ARROW[r][c] === '1') pctx.fillRect(cx + c, cy + r, 1, 1);
       }
     }
   }
@@ -1161,11 +1192,18 @@
 
   function placeSecrets() {
     const rng = seeded(2001);
-    // The ancient tree stands alone, ideally in the central clearing.
-    secrets.ancient = findSpot(rng, 12, 7) || findSpot(rng, 12);
+    // The ancient tree stands alone in an open patch.
+    secrets.ancient = findSpot(rng, 12);
+    // Three wells, well apart from one another.
     for (const bit of [1, 2, 4]) {
-      const s = findSpot(rng, 6, bit);
-      if (s) secrets.wells.push({ ...s, kind: WELL_KINDS[bit] });
+      for (let k = 0; k < 40; k++) {
+        const s = findSpot(rng, 6);
+        if (!s) break;
+        if (secrets.wells.every(w => Math.hypot(w.x - s.x, w.y - s.y) > 600) || k === 39) {
+          secrets.wells.push({ ...s, kind: WELL_KINDS[bit] });
+          break;
+        }
+      }
     }
     for (let k = 0; k < 5; k++) {
       const s = findSpot(rng, 8);
@@ -1217,6 +1255,11 @@
     if (bx < 0 || by < 0 || bx >= world.gw || by >= world.gh) return false;
     const f = Math.floor(terrainCells[by * world.gw + bx] / world.bands);
     return f === 3 || f === 4;
+  }
+  function isSand(x, y) {
+    const bx = Math.floor(x / world.block), by = Math.floor(y / world.block);
+    if (bx < 0 || by < 0 || bx >= world.gw || by >= world.gh) return false;
+    return Math.floor(terrainCells[by * world.gw + bx] / world.bands) === 5;
   }
   function isMeadow(x, y) {
     const bx = Math.floor(x / world.block), by = Math.floor(y / world.block);
@@ -1285,7 +1328,7 @@
       const p = level === 4 ? myWorldPos() : me, r = level === 4 ? 9 : 40;
       for (let k = 0; k < 80; k++) {
         const x = Math.round(p.x + (Math.random() - 0.5) * 2 * r), y = Math.round(p.y + (Math.random() - 0.5) * 2 * r);
-        if (!isWater(x, y) && (isWater(x + 3, y) || isWater(x - 3, y) || isWater(x, y + 3) || isWater(x, y - 3)) && articleAt(x, y) < 0) {
+        if ((isMeadow(x, y) || isSand(x, y)) && (isWater(x + 3, y) || isWater(x - 3, y) || isWater(x, y + 3) || isWater(x, y - 3)) && articleAt(x, y) < 0) {
           secrets.frog = { x, y, born: t };
           playSample('Common frog');
           break;
@@ -1589,11 +1632,10 @@
     if (x < 0 || y < 0 || x >= vw || y >= vh) return false;
     return lightBuf[y * vw + x] >= 0.32;
   }
-  // Can the walker see this spot? At night: inside a light. By day: inside the circle of view.
+  // Can the walker see this spot? At night: inside a light. By day: anywhere on screen.
   function canSeeAt(wx, wy) {
     if (level === 4) return litAt(wx, wy);
-    const cx = cam.x + innerWidth / scale / 2, cy = cam.y + innerHeight / scale / 2;
-    return ovalEdge(wx - cx, wy - cy, visionOval()) <= -FADE / 3;
+    return wx >= cam.x && wy >= cam.y && wx < cam.x + innerWidth / scale && wy < cam.y + innerHeight / scale;
   }
   const canSee = i => canSeeAt(world.articles[i][2], world.articles[i][3]);
 
@@ -1607,7 +1649,7 @@
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) { savePosition(); stop(); }
-    else { updateLevel(); start(); }
+    else if (world && ground && wallPattern) { updateLevel(); start(); } // not before the world has loaded
   });
   addEventListener('pagehide', savePosition);
 
@@ -1864,7 +1906,10 @@
     }));
     if (leftHere) { c.fillStyle = '#fff6c0'; c.fillRect(3, 4, 1, 1); }
     pBtn.setAttribute('aria-pressed', String(leftHere));
-    pBtn.title = leftHere ? 'your lantern glows here. take it back (L)' : others ? 'lanterns glow here. leave yours (L)' : 'leave a lantern (L)';
+    const left = lanternsLeftToday();
+    pBtn.title = leftHere ? 'your lantern glows here. take it back (L)'
+      : !left ? 'no lanterns left today'
+      : `${others ? 'lanterns glow here. leave yours' : 'leave a lantern'} (L) · ${left} left today`;
     pBtn.setAttribute('aria-label', pBtn.title);
   }
 
@@ -2016,20 +2061,32 @@
     statPlanted.textContent = fmt(plantedCount);
   }
 
-  // Pointer, bottom-left: a plain triangle pointing to the nearest lantern.
-  // Rasterised at the needed angle (16 directions).
+  // Pointer, bottom-left: the lantern icon, with a small triangle beside it
+  // showing which way the nearest lantern is (8 directions).
   const pointerBox = $('#pointer');
   const pointerCtx = pointerBox.querySelector('canvas').getContext('2d');
-  const TRIANGLE = [[4.4, 0], [-3.4, -2.6], [-3.4, 2.6]]; // a slim arrowhead: the tip is unmistakable
+  // Drawn at one canvas pixel per screen pixel: the lantern is doubled to
+  // match the card's, and the triangle gets enough pixels to look like one.
+  const PN = 30;
+  // Eight hand-drawn triangles (drawing one at any angle on this small grid
+  // always looks broken): straight ones for the four sides, corner ones for
+  // the diagonals. Each sits just outside the lantern.
+  const TRI_SIDE = ['#...', '##..', '###.', '####', '###.', '##..', '#...'];   // points right
+  const TRI_CORNER = ['#####', '.####', '..###', '...##', '....#'];            // points up-right
+  const flipX = rows => rows.map(r => [...r].reverse().join(''));
+  const flipY = rows => rows.slice().reverse();
+  const turn = rows => rows[0].split('').map((_, x) => rows.map(r => r[x]).join('')); // transpose
+  const TRIANGLES = [
+    [TRI_SIDE, 25, 11],                  // 0 east
+    [flipY(TRI_CORNER), 23, 24],         // 1 south-east
+    [turn(TRI_SIDE), 11, 25],            // 2 south
+    [flipX(flipY(TRI_CORNER)), 2, 24],   // 3 south-west
+    [flipX(TRI_SIDE), 1, 11],            // 4 west
+    [flipX(TRI_CORNER), 2, 1],           // 5 north-west
+    [flipY(turn(TRI_SIDE)), 11, 1],      // 6 north
+    [TRI_CORNER, 23, 1],                 // 7 north-east
+  ];
   let pointerKey = '';
-  function inPolygon(x, y, poly) {
-    let inside = false;
-    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-      const [xi, yi] = poly[i], [xj, yj] = poly[j];
-      if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
-    }
-    return inside;
-  }
   function updateCompass() {
     // Measured from the walker (the middle of the view), not the mouse.
     const me = { x: cam.x + innerWidth / scale / 2, y: cam.y + innerHeight / scale / 2 };
@@ -2039,24 +2096,28 @@
       if (d < bd) { bd = d; best = g; }
     }
     // Nothing to point at, or the lantern is already in view: no pointer.
-    // (At night a lantern's glow shows anywhere on screen; by day, inside the circle.)
+    // (A lantern shows anywhere on screen: its glow at night, the lantern by day.)
     const halfW = innerWidth / scale / 2 - 2, halfH = innerHeight / scale / 2 - 2;
-    const inView = best && (level === 4
-      ? Math.abs(best.x - me.x) < halfW && Math.abs(best.y - me.y) < halfH
-      : ovalEdge(best.x - me.x, best.y - me.y, visionOval()) <= -FADE / 2);
+    const inView = best && Math.abs(best.x - me.x) < halfW && Math.abs(best.y - me.y) < halfH;
     pointerBox.hidden = !best || inView;
     if (pointerBox.hidden) { pointerKey = ''; return; }
     pointerBox.title = `nearest lantern: about ${Math.max(1, Math.round(bd / 4))} steps`;
-    const step = Math.round(Math.atan2(best.y - me.y, best.x - me.x) / (Math.PI / 8));
+    const step = ((Math.round(Math.atan2(best.y - me.y, best.x - me.x) / (Math.PI / 4)) % 8) + 8) % 8;
     if (String(step) === pointerKey) return;
     pointerKey = String(step);
-    const a = step * Math.PI / 8, c = Math.cos(a), s = Math.sin(a);
-    pointerCtx.clearRect(0, 0, 9, 9);
-    for (let y = 0; y < 9; y++) for (let x = 0; x < 9; x++) {
-      const px = x + 0.5 - 4.5, py = y + 0.5 - 4.5;
-      const lx = px * c + py * s, ly = -px * s + py * c; // into the triangle's frame
-      if (inPolygon(lx, ly, TRIANGLE)) { pointerCtx.fillStyle = '#f5d142'; pointerCtx.fillRect(x, y, 1, 1); }
-    }
+    pointerCtx.clearRect(0, 0, PN, PN);
+    // The lantern, lit, as on the cards.
+    LANTERN_ICON.forEach((row, y) => [...row].forEach((ch, x) => {
+      if (ch === '.') return;
+      pointerCtx.fillStyle = ch === 'g' ? '#f5d142' : '#c8a838';
+      pointerCtx.fillRect(8 + x * 2, 7 + y * 2, 2, 2);
+    }));
+    pointerCtx.fillStyle = '#fff6c0';
+    pointerCtx.fillRect(14, 15, 2, 2);
+    // The triangle at the rim, in the lantern's direction.
+    const [rows, ox, oy] = TRIANGLES[step];
+    pointerCtx.fillStyle = '#f5d142';
+    rows.forEach((row, y) => [...row].forEach((ch, x) => { if (ch === '#') pointerCtx.fillRect(ox + x, oy + y, 1, 1); }));
   }
 
   const clockTime = $('#clock-time');
@@ -2167,7 +2228,7 @@
     const bx = Math.floor(wx / world.block), by = Math.floor(wy / world.block);
     if (bx < 0 || by < 0 || bx >= world.gw || by >= world.gh) return 'thicket';
     const f = Math.floor(terrainCells[by * world.gw + bx] / world.bands);
-    return f === 1 || f === 2 ? 'thicket' : f === 3 || f === 4 ? 'water' : f === 5 ? 'sand' : 'grass';
+    return f === 1 || f === 2 ? 'thicket' : f === 3 || f === 4 ? 'water' : f === 5 || f === 6 ? 'sand' : f === 7 ? 'bridge' : 'grass';
   }
 
   function burst(filterType, freq, q, dur, vol, rate) {
@@ -2190,6 +2251,7 @@
     if (surface === 'thicket') burst('bandpass', 1900 * r, 0.5, 0.2, 0.08, 1);
     else if (surface === 'sand') burst('highpass', 2200 * r, 0.7, 0.08, 0.07, 1);
     else if (surface === 'water') burst('lowpass', 520 * r, 1.2, 0.26, 0.12, 0.8);
+    else if (surface === 'bridge') burst('bandpass', 380 * r, 2.5, 0.13, 0.14, 1); // hollow wooden knock
     else burst('bandpass', 800 * r, 0.9, 0.11, 0.11, 1);
   }
 

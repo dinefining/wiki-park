@@ -12,7 +12,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Silkscreen&family=VT323&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=2026-10-20b">
+  <link rel="stylesheet" href="style.css?v=2026-10-23a">
 </head>
 <body>
   <canvas id="people" aria-hidden="true"></canvas>
@@ -50,24 +50,17 @@
 
   <aside id="info" class="panel" role="dialog" aria-modal="false" aria-labelledby="info-title" hidden>
     <h2 id="info-title">wiki park</h2>
-    <p class="panel-text">Before everything was a search away, you learnt things as they came: from whoever you met, at whatever pace the day allowed.</p>
-    <p class="panel-text">Wiki Park is a shared park of Wikipedia articles, where nature, technology and being human meet. There's no search, no zoom and no map. You see only what's around you, the way you would on a walk, and other people stroll here with you.</p>
-    <h3 class="info-sub">how to walk</h3>
+    <p class="panel-text">A homage to a time when discovering things meant stumbling upon them. Conversations, tidbits of trivia, links that led somewhere unexpected.</p>
+    <p class="panel-text">Wiki Park is a shared landscape of Wikipedia articles at the intersection of <span class="t-nature">nature</span>, <span class="t-tech">technology</span> and <span class="t-human">being human</span>. There's no search, no zoom, no map. Take a walk, see what's around you, stop when something catches your eye. Leave a lantern if you'd like to find your way back.</p>
+    <p class="panel-text">There's no need to get anywhere.</p>
+    <hr class="info-rule">
     <ul class="info-list">
-      <li>Scroll, drag or use the arrow keys. Push harder, or hold Shift, to jog for a moment.</li>
-      <li>Click a plant to read it. Crosses are shorter articles, diamonds the long ones, and rings grow where the themes mix. The colour tells you what it's about:</li>
-    </ul>
-    <ul class="legend">
-      <li><i style="background:#f4fc8c"></i>nature</li>
-      <li><i style="background:#86e2fa"></i>technology</li>
-      <li><i style="background:#eeaef4"></i>being human</li>
-    </ul>
-    <ul class="info-list">
-      <li>Found something you liked? Press L, or the lantern on its card, to leave a lantern for others. Press L again to take it back. The pointer in the corner leads to the nearest one.</li>
-      <li>Double-click open ground to plant an article of your own, one a day.</li>
-      <li>The park keeps your local time. At night you see only what your lantern lights.</li>
-      <li>Pale arrows are other walkers. A tiny dot beside a plant means someone planted it.</li>
-      <li>Not everything here is an article.</li>
+      <li>Scroll, drag or use arrow keys to wander.</li>
+      <li>Click a plant to read.</li>
+      <li>Press L or tap a card's lantern to leave one for others. Press again to take it back. Three per day. The corner pointer leads to the nearest lantern.</li>
+      <li>Double-click open ground to plant an article. One per day.</li>
+      <li>The park follows your local time. At night, only your lantern lights the way.</li>
+      <li>Pale arrows are other walkers. Tiny dots mark plants someone has planted.</li>
     </ul>
     <p class="info-credit">A <a href="https://maybemachines.com" target="_blank" rel="noopener">Maybe Machine</a> by <a href="https://ravipopat.info" target="_blank" rel="noopener">Ravi Popat</a>.</p>
   </aside>
@@ -81,10 +74,10 @@
   <button id="sound-toggle" class="hud hud-tr" type="button" aria-pressed="false" aria-label="forest sounds" title="forest sounds"><canvas class="ico" data-icon="sound-off" width="7" height="7"></canvas></button>
 
   <div id="pointer" class="hud hud-bl" title="nearest lantern" hidden>
-    <canvas width="9" height="9" aria-hidden="true"></canvas>
+    <canvas width="30" height="30" aria-hidden="true"></canvas>
   </div>
 
-  <script src="config.js?v=2026-10-20b"></script>
-  <script src="main.js?v=2026-10-20b"></script>
+  <script src="config.js?v=2026-10-23a"></script>
+  <script src="main.js?v=2026-10-23a"></script>
 </body>
 </html>
