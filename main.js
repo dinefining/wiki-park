@@ -3,7 +3,7 @@
   'use strict';
 
   // Bump with index.html's ?v= tags when you publish changes, so browsers fetch fresh files.
-  const VERSION = '2026-10-19e';
+  const VERSION = '2026-10-19g';
   const CFG = window.WIKIPARK_CONFIG || {};
   const $ = s => document.querySelector(s);
   const canvas = $('#world');
@@ -1026,7 +1026,7 @@
   // for everyone; the bottle, the owl and the deer come and go.
 
   const secrets = { wells: [], rings: [], ancient: null, bottle: null, owl: null, deer: null, frog: null, bird: null,
-    nextBottle: 0, nextOwl: 0, nextDeer: 0, nextFrog: 0, nextBird: 0, ringCooldown: 0, warp: null };
+    nextBottle: 0, nextOwl: 0, nextDeer: 0, nextFrog: 0, nextBird: 0, warp: null };
 
   // Atlas Shrugged's first surviving edit is from 28 January 2001, two weeks
   // after Wikipedia began: one of its oldest articles.
@@ -1035,7 +1035,10 @@
   const WELL_KINDS = { 1: 'picture', 2: 'featured', 4: 'onthisday' };
   const STONE = [css(hex('#9c9a8c')), css(hex('#7e7c70'))];
   const WELL_WATER = css(hex('#1c3c5c'));
-  const MUSHROOM = css(hex('#ece2cc')), MUSHROOM_SPOT = css(hex('#c8b89c'));
+  // Toadstools: c cap, d spots, u the cap's darker underside, s stem, * a twinkle.
+  const TOADSTOOL_COLOURS = { c: css(hex('#ece2cc')), d: css(hex('#c8b89c')), u: css(hex('#b4a487')), s: css(hex('#f6f1e4')), '*': css(hex('#ffffff')) };
+  const TOADSTOOL_SMALL = ['ccc', 'uuu', '.s.']; // T-shaped, so they don't read as the plus-shaped flowers
+  const TOADSTOOL_BIG = ['..ccc..', '.cdccc.', 'ccccdcc', '.uuuuu.', '...s...', '..sss..'];
   const ANCIENT_COLOURS = ['#2c5c2c', '#3c6c34', '#4c7c3c', '#9cac8c'].map(hex).map(css);
   const BOTTLE = css(hex('#5c9c7c')), CORK = css(hex('#be9b65'));
   const OWL = css(hex('#8c7c64')), OWL_EYE = css(hex('#ece6b4'));
@@ -1116,14 +1119,17 @@
   const near = (s, ix, iy, r) => s && s.x > ix - r && s.y > iy - r && s.x < ix + vw + r && s.y < iy + vh + r;
 
   function drawSecrets(ix, iy, ft) {
+    // Fairy rings: small toadstools in a circle, a bigger one in the middle
+    // that twinkles now and then. Click it to be whisked away.
     for (const r of secrets.rings) {
-      if (!near(r, ix, iy, 10)) continue;
+      if (!near(r, ix, iy, 12)) continue;
       for (let k = 0; k < 9; k++) {
         const a = (k / 9) * Math.PI * 2 + r.x;
-        const mx = Math.round(r.x + Math.cos(a) * 6) - ix, my = Math.round(r.y + Math.sin(a) * 6) - iy;
-        ctx.fillStyle = MUSHROOM; ctx.fillRect(mx, my, 2, 1); ctx.fillRect(mx, my + 1, 1, 1);
-        ctx.fillStyle = MUSHROOM_SPOT; ctx.fillRect(mx + 1, my + 1, 1, 1);
+        const mx = Math.round(r.x + Math.cos(a) * 7) - ix, my = Math.round(r.y + Math.sin(a) * 7) - iy;
+        drawSprite(TOADSTOOL_SMALL, mx - 1, my - 1, TOADSTOOL_COLOURS);
       }
+      drawSprite(TOADSTOOL_BIG, r.x - 3 - ix, r.y - 3 - iy, TOADSTOOL_COLOURS);
+      if (Math.floor(ft / 450 + r.x) % 5 === 0) drawSprite(['*'], r.x + 2 - ix, r.y - 5 - iy, TOADSTOOL_COLOURS);
     }
     for (const w of secrets.wells) {
       if (near(w, ix, iy, 6)) drawSprite(WELL_PX, w.x - 3 - ix, w.y - 3 - iy, { '#': STONE[(w.x + w.y) & 1], o: WELL_WATER });
@@ -1263,12 +1269,6 @@
       if (dist > 150 || t - d.born > 120000 || level > 2) secrets.deer = null;
     }
 
-    // Fairy rings: step inside one and you're whisked somewhere random.
-    if (!secrets.warp && t > secrets.ringCooldown) {
-      for (const r of secrets.rings) {
-        if (Math.hypot(r.x - me.x, r.y - me.y) < 4.5) { startWarp(t); break; }
-      }
-    }
     if (secrets.warp && t - secrets.warp.start > secrets.warp.half && !secrets.warp.moved) {
       secrets.warp.moved = true;
       const a = world.articles[Math.floor(Math.random() * world.articles.length)];
@@ -1278,7 +1278,6 @@
     }
     if (secrets.warp && t - secrets.warp.start > secrets.warp.half * 2) {
       secrets.warp = null;
-      secrets.ringCooldown = t + 4000;
     }
   }
 
@@ -1303,6 +1302,7 @@
   function secretAt(wx, wy) {
     const hit = (s, r) => s && Math.abs(wx - s.x) <= r && Math.abs(wy - s.y) <= r;
     for (const w of secrets.wells) if (hit(w, 3)) return () => openWell(w);
+    for (const r of secrets.rings) if (hit(r, 3)) return () => { if (!secrets.warp) startWarp(performance.now()); };
     if (hit(secrets.ancient, 6)) return () => openTitle(ANCIENT.title, `the ancient tree · first written ${ANCIENT.since}`);
     if (hit(secrets.bottle, 2)) return () => { secrets.bottle = null; openBottle(); };
     if (hit(secrets.owl, 1)) return () => { playSample('Tawny owl', hoot); openTitle('Owl', 'a night owl'); };
